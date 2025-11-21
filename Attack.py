@@ -389,9 +389,191 @@ def zoom_out():
         logging.error(f"Zoom out failed: {traceback.format_exc()}")
         return False
 
+# ============================================================
+#                  WALL UPGRADE ENGINE
+# ============================================================
+
+# Maximum real storage in your account
+MAX_STORAGE = 29_000_000
+
+# Relative offsets based on LDPlayer window (x, y, w, h)
+GOLD_OFFSET   = (1019, 59, 107, 27)
+ELIXIR_OFFSET = (1005, 121, 124, 28)
+
+# Upgrade buttons (LDPlayer-relative offsets)
+UPGRADE_USING_GOLD   = (738, 566)
+UPGRADE_USING_ELIXIR = (879, 564)
+
+# Wall list entry (LDPlayer-relative)
+WALL_ENTRY_OFFSET = (674, 532)
+
+# Scroll area (LDPlayer-relative)
+SCROLL_POINT_OFFSET = (683, 516)
+
+# Upgrade panel open button (LDPlayer-relative)
+UPGRADE_PANEL_OFFSET = (631, 76)
+
+# Wall text region (ABSOLUTE after conversion through LDPlayer)
+WALL_TEXT_OFFSET = (521, 515, 96, 37)
+
+
+# ---------------- INTERNAL HELPERS ----------------
+
+def get_ldplayer_window():
+    wins = gw.getWindowsWithTitle("LDPlayer")
+    return wins[0] if wins else None
+
+
+def rel_to_abs(offset):
+    win = get_ldplayer_window()
+    if win is None:
+        return None
+    bx, by = win.left, win.top
+    return (bx + offset[0], by + offset[1], offset[2], offset[3]) if len(offset)==4 else (bx + offset[0], by + offset[1])
+
+
+def ocr_storage(offset, debug_file):
+    """Reads storage using OCR with all fixes."""
+    region = rel_to_abs(offset)
+    if region is None:
+        logging.error("LDPlayer not found for storage OCR")
+        return 0
+
+    x, y, w, h = region
+    img = pyautogui.screenshot(region=(x, y, w, h))
+    img.save(debug_file)
+
+    img = cv2.cvtColor(np.array(img), cv2.COLOR_BGR2GRAY)
+    img = cv2.resize(img, None, fx=3, fy=3, interpolation=cv2.INTER_LINEAR)
+    img = cv2.bilateralFilter(img, 9, 75, 75)
+    _, img = cv2.threshold(img, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+    raw = pytesseract.image_to_string(
+        img,
+        config="--oem 3 --psm 6 -c tessedit_char_whitelist=0123456789 "
+    )
+    digits = ''.join(c for c in raw if c.isdigit())
+
+    # If no digits at all
+    if digits == "":
+        return 0
+
+    # Remove raw OCR accidents like "11" inserted
+    while "11" in digits and len(digits) > 7:
+        digits = digits.replace("11", "1")
+
+    # Trim to 8 digits max since CoC storage NEVER exceeds this
+    if len(digits) > 8:
+        digits = digits[-8:]
+
+    value = int(digits)
+
+    # FINAL SAFETY RULE:
+    # If OCR overshoots max storage → return 0 (force retry)
+    if value > MAX_STORAGE:
+        return 0
+
+    return value
+
+
+def ocr_wall_text():
+    """Detects 'wall' text from the upgrade list after scrolling."""
+    wx, wy, ww, wh = WALL_TEXT_OFFSET
+    img = pyautogui.screenshot(region=(wx, wy, ww, wh))
+    img.save("wall_region_debug.png")
+
+    gray = cv2.cvtColor(np.array(img), cv2.COLOR_BGR2GRAY)
+    _, th = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY)
+
+    text = pytesseract.image_to_string(th).lower()
+    return "wall" in text
+
+
+def click_rel(offset):
+    abs_pos = rel_to_abs(offset)
+    pyautogui.click(abs_pos[0], abs_pos[1])
+
+
+# --------------------------------------------------
+#                 WALL UPGRADE MAIN
+# --------------------------------------------------
+
+def auto_wall_upgrade():
+    """Main wall-upgrade logic. Runs BEFORE every attack."""
+    try:
+        win = get_ldplayer_window()
+        if win is None:
+            logging.error("LDPlayer not found — skip wall upgrade")
+            return
+
+        # Read gold + elixir
+        gold   = ocr_storage(GOLD_OFFSET,   "debug_gold.png")
+        elixir = ocr_storage(ELIXIR_OFFSET, "debug_elixir.png")
+
+        # Require at least 8M
+        if gold < 8_000_000 and elixir < 8_000_000:
+            return  # No upgrade needed
+
+        logging.info(f"[WALL] Triggered: Gold={gold}, Elixir={elixir}")
+
+        # Open upgrade panel
+        click_rel(UPGRADE_PANEL_OFFSET)
+        time.sleep(0.5)
+
+        # Scroll upgrade list
+        abs_scroll = rel_to_abs(SCROLL_POINT_OFFSET)
+        pyautogui.moveTo(abs_scroll[0], abs_scroll[1], duration=0.2)
+        for _ in range(6):
+            pyautogui.scroll(-600)
+            time.sleep(0.2)
+        time.sleep(0.8)
+
+        # Check for "wall" in text
+        if not ocr_wall_text():
+            logging.error("[WALL] Wall entry NOT found after scrolling")
+            return
+
+        # Click wall entry
+        click_rel(WALL_ENTRY_OFFSET)
+        time.sleep(0.4)
+
+        # Determine which resource to use
+        walls_gold   = gold   // 8_000_000
+        walls_elixir = elixir // 8_000_000
+
+        total = walls_gold + walls_elixir
+
+        logging.info(f"[WALL] Upgrading {total} walls (G:{walls_gold}, E:{walls_elixir})")
+
+        # Upgrade using GOLD first
+        for _ in range(walls_gold):
+            click_rel(UPGRADE_USING_GOLD)
+            time.sleep(0.3)
+
+        # Then upgrade using ELIXIR
+        for _ in range(walls_elixir):
+            click_rel(UPGRADE_USING_ELIXIR)
+            time.sleep(0.3)
+
+        logging.info("[WALL] Wall upgrade finished")
+
+    except Exception as e:
+        logging.error(f"[WALL] ERROR: {traceback.format_exc()}")
+
 def attack():
     """Handle full attack sequence."""
     logging.debug("Starting attack")
+    # -----------------------------
+    # AUTO WALL UPGRADE BEFORE ATTACK
+    # -----------------------------
+    try:
+        if auto_wall_upgrade_var.get():     # Check GUI toggle
+            logging.info("Auto Wall Upgrade ON — checking storage...")
+            auto_wall_upgrade()
+        else:
+            logging.info("Auto Wall Upgrade OFF")
+    except Exception as e:
+        logging.error(f"Wall upgrade check failed: {traceback.format_exc()}")
 
     if not activate_game_window():
         return False
@@ -404,6 +586,7 @@ def attack():
             logging.info("Auto zoom is OFF — skipping zoom out")
     except:
         logging.error("Failed reading zoom checkbox state")
+
 
     collectorchecker()
     if not startAttacking():
@@ -776,6 +959,18 @@ if __name__ == "__main__":
         selectcolor="black",
     )
     zoom_chk.pack(pady=2)
+
+    # Auto Wall Upgrade Checkbox
+    auto_wall_upgrade_var = tk.BooleanVar(value=True)
+    wall_chk = tk.Checkbutton(
+        root,
+        text="Auto Wall Upgrade",
+        variable=auto_wall_upgrade_var,
+        bg="black",
+        fg="white",
+        selectcolor="black",
+    )
+    wall_chk.pack(pady=2)
 
     # Buttons
     tk.Button(root, text="Start", command=start_bot, bg="green", fg="white").pack(fill=tk.X, pady=1)
