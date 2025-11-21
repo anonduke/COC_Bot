@@ -1,0 +1,15 @@
+.venv
+coc_bot_detailed.log
+donation_bot.log
+__pycache__/
+*.pyc
+.env
+instance
+.DS_Store
+.vscode/
+.idea/
+logs/
+*.log
+*.png
+*.jpg
+
