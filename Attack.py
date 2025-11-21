@@ -40,6 +40,8 @@ CONFIG = {
 # Global variables
 WINDOW_X, WINDOW_Y = 0, 0
 gold_region_files = []
+auto_zoomout_var = None
+
 # **Troop & Spell Deployment Coordinates**
 
 goblins_positions = [
@@ -351,6 +353,41 @@ def deployTroops():
             pyautogui.click(x + randint(-5, 5), y + randint(-5, 5))
     logging.info("Troop and spell deployment complete")
     return True
+def zoom_out():
+    """Zoom out inside LDPlayer (1600x900)."""
+    try:
+        # Activate window
+        windows = gw.getWindowsWithTitle("LDPlayer")
+        if not windows:
+            logging.error("LDPlayer not found for zoom")
+            return False
+
+        win = windows[0]
+        win.activate()
+        win.restore()
+        time.sleep(0.5)
+
+        # Center of 1600x900
+        cx = win.left + 800
+        cy = win.top + 450
+
+        # Move inside gameplay area
+        pyautogui.moveTo(cx, cy, duration=0.2)
+        time.sleep(0.2)
+
+        # Zoom out
+        pyautogui.keyDown("ctrl")
+        for _ in range(7):
+            pyautogui.scroll(-600)
+            time.sleep(0.15)
+        pyautogui.keyUp("ctrl")
+
+        logging.info("Zoomed out successfully")
+        return True
+
+    except Exception as e:
+        logging.error(f"Zoom out failed: {traceback.format_exc()}")
+        return False
 
 def attack():
     """Handle full attack sequence."""
@@ -358,6 +395,16 @@ def attack():
 
     if not activate_game_window():
         return False
+    # Only zoom if user enabled checkbox
+    try:
+        if auto_zoomout_var.get():
+            logging.info("Auto zoom is ON — performing zoom out")
+            zoom_out()
+        else:
+            logging.info("Auto zoom is OFF — skipping zoom out")
+    except:
+        logging.error("Failed reading zoom checkbox state")
+
     collectorchecker()
     if not startAttacking():
         return False
@@ -505,8 +552,6 @@ def capture_battlefield():
     except Exception as e:
         logging.error(f"Failed to capture battlefield: {traceback.format_exc()}")
         return None
-
-
 
 def find_defense_positions(template_path, battlefield_image, threshold=0.75):
     """Finds key defense structures using template matching."""
@@ -719,6 +764,18 @@ if __name__ == "__main__":
     # Timer label (defined before use)
     timer_label = tk.Label(root, text="Elapsed: 00:00:00", fg="yellow", bg="black", font=("Arial", 10))
     timer_label.pack(pady=2)
+
+    # Auto Zoomout Checkbox
+    auto_zoomout_var = tk.BooleanVar(value=True)  # DEFAULT = enabled
+    zoom_chk = tk.Checkbutton(
+        root,
+        text="Auto Zoomout",
+        variable=auto_zoomout_var,
+        bg="black",
+        fg="white",
+        selectcolor="black",
+    )
+    zoom_chk.pack(pady=2)
 
     # Buttons
     tk.Button(root, text="Start", command=start_bot, bg="green", fg="white").pack(fill=tk.X, pady=1)
