@@ -422,11 +422,11 @@ def attack():
         return False
 
     # AUTO ZOOM
-    try:
-        if auto_zoomout_var.get():
-            zoom_out()
-    except:
-        pass
+    # try:
+    #     if auto_zoomout_var.get():
+    #         zoom_out()
+    # except:
+    #     pass
 
     # collect resources
     try:

@@ -1,0 +1,29 @@
+import tkinter as tk
+
+# INPUT YOUR REGION HERE (x, 
+# y, width, height)
+REGION = (1093,  68, 119, 30)
+
+def highlight_region(x, y, width, height):
+    root = tk.Tk()
+    root.attributes('-fullscreen', True)
+    root.attributes('-alpha', 0.3)
+    root.attributes('-topmost', True)
+    root.configure(bg='black')
+    
+    canvas = tk.Canvas(root, highlightthickness=0, bg='black')
+    canvas.pack(fill='both', expand=True)
+    
+    # Draw green rectangle
+    canvas.create_rectangle(x, y, x + width, y + height, 
+                          outline='green', width=4)
+    
+    print(f"✅ Highlighting region: ({x}, {y}, {width}, {height})")
+    print("Press ESC to close")
+    
+    root.bind('<Escape>', lambda e: root.destroy())
+    root.mainloop()
+
+if __name__ == "__main__":
+    x, y, w, h = REGION
+    highlight_region(x, y, w, h)

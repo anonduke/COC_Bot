@@ -466,7 +466,7 @@ def main_loop():
         logging.error("Failed to activate game window. Exiting.")
         return
     
-    zoomOutAndCenter()
+    # zoomOutAndCenter()
     logging.info("Clash of Clans bot started")
     
     while True:

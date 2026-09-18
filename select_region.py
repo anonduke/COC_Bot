@@ -1,121 +1,159 @@
-import cv2
-import numpy as np
 import pyautogui
 import pygetwindow as gw
 import time
+from pynput import keyboard
+import tkinter as tk
+import threading
 
-GAME_TITLE = "Clash of Clans - FasaluRahmanfrkp"
+GAME_TITLE = "LDPlayer"
 
-# Variables
-selecting = False
+spacebar_pressed = False
 start_x = start_y = end_x = end_y = 0
 final_roi = None
+overlay = None
+canvas = None
+root = None
 
+
+# -------------------------------------------------
+# WAIT FOR LDPLAYER WINDOW
+# -------------------------------------------------
 def wait_for_game_window():
     print("🔍 Waiting for game window:", GAME_TITLE)
-
     while True:
         wins = gw.getWindowsWithTitle(GAME_TITLE)
         if wins:
-            win = wins[0]
             print("✅ Game window detected!")
-            return win
-
-        print("⏳ Game window not found, retrying...")
+            return wins[0]
         time.sleep(1)
 
 
-def capture_game_window(win):
-    """Capture ONLY the Clash of Clans window area."""
-    x, y = win.left, win.top
-    w, h = win.width, win.height
-
-    print(f"📸 Capturing game window at ({x},{y}) {w}x{h}")
-
-    screenshot = pyautogui.screenshot(region=(x, y, w, h))
-    img = cv2.cvtColor(np.array(screenshot), cv2.COLOR_BGR2RGB)
-
-    return img, x, y, w, h
+# -------------------------------------------------
+# DRAW RED RECTANGLE WHILE DRAGGING
+# -------------------------------------------------
+def update_rectangle():
+    global canvas, start_x, start_y, end_x, end_y
+    if canvas:
+        canvas.delete("all")
+        canvas.create_rectangle(start_x, start_y, end_x, end_y,
+                                outline='red', width=3)
 
 
-def mouse_callback(event, x, y, flags, param):
-    global selecting, start_x, start_y, end_x, end_y, final_roi
+# -------------------------------------------------
+# SPACEBAR PRESS → START POINT
+# -------------------------------------------------
+def on_press(key):
+    global spacebar_pressed, start_x, start_y, root
+    if key == keyboard.Key.space and not spacebar_pressed:
+        spacebar_pressed = True
+        pos = pyautogui.position()
+        start_x, start_y = pos.x, pos.y
+        if root:
+            root.deiconify()
+        print(f"✅ Start: ({start_x}, {start_y})")
 
-    if event == cv2.EVENT_LBUTTONDOWN:
-        selecting = True
-        start_x, start_y = x, y
 
-    elif event == cv2.EVENT_MOUSEMOVE and selecting:
-        end_x, end_y = x, y
-
-    elif event == cv2.EVENT_LBUTTONUP:
-        selecting = False
-        end_x, end_y = x, y
+# -------------------------------------------------
+# SPACEBAR RELEASE → END POINT
+# -------------------------------------------------
+def on_release(key):
+    global spacebar_pressed, end_x, end_y, final_roi, root
+    if key == keyboard.Key.space and spacebar_pressed:
+        spacebar_pressed = False
+        pos = pyautogui.position()
+        end_x, end_y = pos.x, pos.y
         final_roi = (start_x, start_y, end_x, end_y)
+        if root:
+            root.withdraw()
+        print(f"✅ End: ({end_x}, {end_y})")
+        return False
 
 
+# -------------------------------------------------
+# OVERLAY WINDOW
+# -------------------------------------------------
+def run_overlay():
+    global root, canvas
+    root = tk.Tk()
+    root.attributes('-fullscreen', True)
+    root.attributes('-alpha', 0.3)
+    root.attributes('-topmost', True)
+    root.configure(bg='black')
+
+    canvas = tk.Canvas(root, highlightthickness=0, bg='black')
+    canvas.pack(fill='both', expand=True)
+
+    root.withdraw()
+    root.mainloop()
+
+
+# -------------------------------------------------
+# MAIN
+# -------------------------------------------------
 def main():
-    global final_roi
+    global final_roi, spacebar_pressed, end_x, end_y
 
-    # STEP 1: Wait for game window
     win = wait_for_game_window()
     win.activate()
     time.sleep(1)
 
-    # STEP 2: Capture game window ONLY
-    img, base_x, base_y, win_w, win_h = capture_game_window(win)
-    clone = img.copy()
-
-    cv2.namedWindow("Select Troop Bar Region")
-    cv2.setMouseCallback("Select Troop Bar Region", mouse_callback)
-
     print("\n🖱 INSTRUCTIONS:")
-    print(" → A window will appear showing ONLY the game screen.")
-    print(" → Click and DRAG over the troop bar region.")
-    print(" → Release mouse, then press ENTER to confirm.")
-    print(" → Press ESC to cancel.\n")
+    print(" 1. Move mouse to START point")
+    print(" 2. HOLD SPACEBAR")
+    print(" 3. Move to END point")
+    print(" 4. RELEASE SPACEBAR\n")
 
-    while True:
-        temp = clone.copy()
-        if selecting or final_roi:
-            cv2.rectangle(temp, (start_x, start_y), (end_x, end_y), (0, 255, 0), 2)
+    # Start overlay
+    overlay_thread = threading.Thread(target=run_overlay, daemon=True)
+    overlay_thread.start()
+    time.sleep(0.5)
 
-        cv2.imshow("Select Troop Bar Region", temp)
-        key = cv2.waitKey(1)
+    # Keyboard listener
+    listener = keyboard.Listener(on_press=on_press, on_release=on_release)
+    listener.start()
 
-        if key == 13:  # ENTER key
-            break
-        if key == 27:  # ESC key
-            print("❌ Cancelled.")
-            cv2.destroyAllWindows()
-            return
+    # Real-time rectangle drawing
+    while listener.is_alive():
+        if spacebar_pressed:
+            pos = pyautogui.position()
+            end_x, end_y = pos.x, pos.y
+            update_rectangle()
+        time.sleep(0.01)
 
-    cv2.destroyAllWindows()
+    if root:
+        root.quit()
 
+    # -------------------------------------------------
+    # FINAL ROI PROCESSING (RELATIVE LOGIC ADDED)
+    # -------------------------------------------------
     if final_roi:
         x1, y1, x2, y2 = final_roi
-        left = min(x1, x2)
-        top = min(y1, y2)
+
+        win = gw.getWindowsWithTitle(GAME_TITLE)[0]
+        base_x, base_y = win.left, win.top
+
+        left_abs = min(x1, x2)
+        top_abs = min(y1, y2)
         width = abs(x2 - x1)
         height = abs(y2 - y1)
 
-        # Convert to SCREEN COORDINATES
-        screen_left = base_x + left
-        screen_top = base_y + top
+        # Absolute region (screen coords)
+        abs_region = (left_abs, top_abs, width, height)
 
-        print("\n🎯 FINAL TROOP BAR REGION (SCREEN COORDINATES)")
-        print("------------------------------------------------")
-        print(f"Left   (X): {screen_left}")
-        print(f"Top    (Y): {screen_top}")
-        print(f"Width:     {width}")
-        print(f"Height:    {height}")
-        print("------------------------------------------------")
+        # Relative region
+        rel_left = left_abs - base_x
+        rel_top = top_abs - base_y
 
-        print("\n📌 COPY THIS INTO YOUR MAIN BOT CODE:")
-        print(f"TROOP_BAR_REGION = ({screen_left}, {screen_top}, {width}, {height})\n")
+        relative_region = (rel_left, rel_top, width, height)
 
-    else:
-        print("❌ No region selected.")
+        print("\n============ 📌 COPY THESE VALUES ============\n")
+        print("ABSOLUTE REGION (full screen coords):")
+        print(f"ABS_REGION = ({abs_region[0]}, {abs_region[1]}, {width}, {height})\n")
+
+        print("RELATIVE REGION (LDPlayer-based → USE THIS):")
+        print(f"REL_REGION = ({relative_region[0]}, {relative_region[1]}, {width}, {height})\n")
+
+        print("==============================================\n")
 
 
 if __name__ == "__main__":

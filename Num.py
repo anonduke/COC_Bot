@@ -1,28 +1,63 @@
-import cv2
-import pytesseract
+import tkinter as tk
+import pygetwindow as gw
+import time
 
-# Specify the path to the Tesseract executable (required for Windows)
-pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+GAME_TITLE = "LDPlayer"
 
-def recognize_numbers(image_path):
-    # Read the image
-    image = cv2.imread(image_path)
+# Relative offsets (x, y, width, height)
+GOLD_OFFSET   = (984, 59, 142, 27)
+ELIXIR_OFFSET = (970, 121, 159, 28)
 
-    # Convert the image to grayscale for better OCR results
-    gray_image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
-    # Apply thresholding to improve OCR accuracy
-    _, threshold_img = cv2.threshold(gray_image, 150, 255, cv2.THRESH_BINARY)
+def get_absolute_coords(offset):
+    """Convert relative offset to absolute screen coordinates"""
+    wins = gw.getWindowsWithTitle(GAME_TITLE)
+    if not wins:
+        print(f"❌ {GAME_TITLE} window not found!")
+        return None
+    
+    win = wins[0]
+    base_x, base_y = win.left, win.top
+    
+    x = base_x + offset[0]
+    y = base_y + offset[1]
+    w = offset[2]
+    h = offset[3]
+    
+    return (x, y, w, h)
 
-    # Extract text using pytesseract (digits only)
-    custom_config = r'--oem 3 --psm 6 -c tessedit_char_whitelist=0123456789'
-    recognized_text = pytesseract.image_to_string(threshold_img, config=custom_config)
+def highlight_region(region, label="Region"):
+    """Highlight a region with green box"""
+    if not region:
+        return
+    
+    x, y, w, h = region
+    
+    root = tk.Tk()
+    root.attributes("-fullscreen", True)
+    root.attributes("-alpha", 0.3)
+    root.attributes("-topmost", True)
+    root.configure(bg="black")
+    
+    canvas = tk.Canvas(root, highlightthickness=0, bg="black")
+    canvas.pack(fill="both", expand=True)
+    
+    # Draw green rectangle
+    canvas.create_rectangle(x, y, x + w, y + h, outline="green", width=4)
+    
+    print(f"✅ Highlighting {label}: ({x}, {y}, {w}, {h})")
+    print("Press ESC to close")
+    
+    root.bind("<Escape>", lambda e: root.destroy())
+    root.mainloop()
 
-    # Clean and display the result
-    numbers = ''.join(filter(str.isdigit, recognized_text))
-    print(f"Recognized Numbers: {numbers if numbers else 'No numbers found'}")
-
-# Example usage
 if __name__ == "__main__":
-    image_path = "sample_image.png"  # Change this to your image file
-    recognize_numbers(image_path)
+    # Show GOLD region
+    gold_region = get_absolute_coords(GOLD_OFFSET)
+    if gold_region:
+        highlight_region(gold_region, "GOLD")
+    
+    # Show ELIXIR region
+    elixir_region = get_absolute_coords(ELIXIR_OFFSET)
+    if elixir_region:
+        highlight_region(elixir_region, "ELIXIR")

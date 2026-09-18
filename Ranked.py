@@ -34,7 +34,8 @@ CONFIG = {
     'battle_wait_timeout': 30,
     'gold_region': (60, 125, 125, 25),  # Relative to WINDOW_X, WINDOW_Y
     'retry_attempts': 3,
-    'retry_delay': 2
+    'retry_delay': 2,
+    'ranked_mode': False  # Toggle for ranked battle mode
 }
 
 # Global variables
@@ -67,7 +68,7 @@ archer_queen_position = (207, 353)
 king_position = (347, 489)
 prince_position = (395, 223)
 rc_position = (640, 62)
-cc_position = (347, 489)
+cc_position = (207, 353)
 baby_dragon_position = (395, 223)
 
 
@@ -366,12 +367,42 @@ def attack():
         return False
     # if not zoomOutAndCenter():
     #     return False
+    
+    # **RANKED MODE: Skip validation, attack directly**
+    if CONFIG['ranked_mode']:
+        logging.info("Ranked mode enabled - skipping opponent validation")
+        if deployTroops():
+            # End battle in 1 min
+            time.sleep(60)
+            pyautogui.click(locate_image("misc/battle_screen.png"))
+            time.sleep(1.5)
+            pyautogui.click(locate_image("misc/end_ok.png"))
+            finishBattleAndGoHome()
+            # Delete saved gold region screenshots
+            for file in gold_region_files:
+                try:
+                    os.remove(file)
+                    logging.info(f"Deleted temp file: {file}")
+                except Exception as e:
+                    logging.warning(f"Failed to delete temp file {file}: {e}")
+            gold_region_files.clear()
+            logging.info("Ranked attack completed successfully")
+            return True
+        else:
+            logging.error("Troop deployment failed in ranked mode")
+            return False
+    
+    # **NORMAL MODE: Check opponent and iterate**
+    find_match_image = "misc/findmatch_ranked.png" if CONFIG['ranked_mode'] else "misc/find_match.png"
     for attempt in range(20):
         logging.debug(f"Attack attempt {attempt + 1}/20")
         if isGoodOpponentAdvanced():
             if deployTroops():
                 #end battle in 1 mnt
-                time.sleep(60)
+                if CONFIG['ranked_mode']:
+                    time.sleep(120)
+                else:
+                    time.sleep(60)
                 pyautogui.click(locate_image("misc/battle_screen.png"))
                 time.sleep(1.5)
                 pyautogui.click(locate_image("misc/end_ok.png"))
@@ -394,6 +425,7 @@ def attack():
             return False
     logging.warning("No suitable opponent found after 20 attempts")
     return True
+
 def nextOpponent() -> bool:
     """Skip to next opponent."""
     logging.debug("Entering nextOpponent")
@@ -418,6 +450,7 @@ def nextOpponent() -> bool:
     except Exception as e:
         logging.error(f"Error in nextOpponent: {traceback.format_exc()}")
         return False
+
 def startAttacking():
     """Start the attack by clicking attack -> find_match -> wait for battle screen."""
     logging.debug("Starting attack process")
@@ -431,41 +464,61 @@ def startAttacking():
     logging.info("Clicked attack button")
     time.sleep(2)
 
-    
-
-    #Step 2: Locate and click find_match button
+    # Step 2: Locate and click find_match button (different for ranked mode)
     find_match_btn = None
+    find_match_image = "misc/findmatch_ranked.png" if CONFIG['ranked_mode'] else "misc/find_match.png"
+    
     for i in range(10):
-        find_match_btn = locate_image("misc/find_match.png")
+        find_match_btn = locate_image(find_match_image)
         if find_match_btn:
             break
         time.sleep(2)
 
     if not find_match_btn:
-        logging.error("Find match button not found")
+        logging.error(f"Find match button not found ({find_match_image})")
         return False
     pyautogui.click(find_match_btn)
-    logging.info("Clicked find match button")
+    logging.info(f"Clicked find match button ({'RANKED' if CONFIG['ranked_mode'] else 'NORMAL'} mode)")
     time.sleep(2)
 
+    # Step 3: Click main attack button
     attack_btn = locate_image("misc/attack_button_main.png")
     if not attack_btn:
-        logging.error("Attack button not found")
+        logging.error("Attack button main not found")
         return False
     pyautogui.click(attack_btn)
     logging.info("Clicked attack button main")
     time.sleep(1)
 
-    # Step 3: Wait until battle screen appears
+    # **RANKED MODE: Handle confirmation popup**
+    if CONFIG['ranked_mode']:
+        logging.info("Ranked mode: Looking for confirmation attack button")
+        ranked_confirm_btn = None
+        for i in range(10):
+            ranked_confirm_btn = locate_image("misc/attack_confirm_ranked.png")
+            if ranked_confirm_btn:
+                break
+            time.sleep(1)
+        
+        if not ranked_confirm_btn:
+            logging.error("Ranked confirmation attack button not found")
+            return False
+        
+        pyautogui.click(ranked_confirm_btn)
+        logging.info("Clicked ranked confirmation attack button")
+        time.sleep(2)
+    battlescreen_image = "misc/battle_screen_ranked.png" if CONFIG['ranked_mode'] else "misc/battle_screen.png"
+    # Step 4: Wait until battle screen appears
     logging.info("Waiting for battle screen...")
     for i in range(CONFIG['battle_wait_timeout']):
-        if locate_image("misc/battle_screen.png"):
+        if locate_image(battlescreen_image):
             logging.info("Battle screen detected")
             return True
         time.sleep(1)
 
     logging.error(f"Battle screen not found after {CONFIG['battle_wait_timeout']} seconds")
     return False
+
 # def collectorchecker():
 #     gold_collector = locate_image("misc/gold_mine.png")
 #     elixir_collector = locate_image("misc/elixir_collector.png")
@@ -658,6 +711,17 @@ if __name__ == "__main__":
 
     bot_thread = None
 
+    def toggle_ranked_mode():
+        """Toggle ranked mode on/off"""
+        CONFIG['ranked_mode'] = not CONFIG['ranked_mode']
+        mode_text = "ON ✓" if CONFIG['ranked_mode'] else "OFF"
+        ranked_btn.config(
+            text=f"Ranked: {mode_text}",
+            bg="orange" if CONFIG['ranked_mode'] else "gray",
+            fg="white"
+        )
+        logging.info(f"Ranked mode toggled: {CONFIG['ranked_mode']}")
+
     def start_bot():
         global bot_running, bot_thread, start_time
         if not bot_running:
@@ -697,7 +761,7 @@ if __name__ == "__main__":
         while bot_running:
             try:
                 if datetime.now() - start_time > MAX_RUNTIME:
-                    logging.info("Max runtime of 3 hours reached. Stopping bot.")
+                    logging.info("Max runtime of 4 hours reached. Stopping bot.")
                     stop_bot()
                     break
                 attack()
@@ -712,7 +776,7 @@ if __name__ == "__main__":
     root = tk.Tk()
     root.title("Clash Bot Control")
     root.attributes("-topmost", True)
-    root.geometry("180x140+1200+10")  # Adjust position as needed
+    root.geometry("180x170+1200+10")  # Increased height for new button
     root.resizable(False, False)
     root.configure(bg="black")
 
@@ -723,6 +787,17 @@ if __name__ == "__main__":
     # Timer label (defined before use)
     timer_label = tk.Label(root, text="Elapsed: 00:00:00", fg="yellow", bg="black", font=("Arial", 10))
     timer_label.pack(pady=2)
+
+    # Ranked Mode Toggle Button (NEW)
+    ranked_btn = tk.Button(
+        root, 
+        text="Ranked: OFF", 
+        command=toggle_ranked_mode, 
+        bg="gray", 
+        fg="white",
+        font=("Arial", 9, "bold")
+    )
+    ranked_btn.pack(fill=tk.X, pady=1)
 
     # Buttons
     tk.Button(root, text="Start", command=start_bot, bg="green", fg="white").pack(fill=tk.X, pady=1)

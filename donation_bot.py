@@ -1,279 +1,404 @@
+from datetime import datetime, timedelta
+import time
+import logging
+import random
+import threading
+import tkinter as tk
+import traceback
 import pyautogui
 import pygetwindow as gw
 import cv2
 import numpy as np
-import time
-import os
-import random
-import traceback
 
-# ======================================================
-#  REGIONS (YOUR FINAL VALUES)
-# ======================================================
-DONATE_BUTTON_REGION = (633, 360, 522, 857)        # donate button only
-TROOP_BAR_REGION     = (1163, 658, 731, 626)       # troops area
-SPELL_REGION         = (1185, 1080, 693, 132)      # corrected spell region
+logging.basicConfig(
+    filename='donation_bot.log',
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
 
-GAME_TITLE = "Clash of Clans - FasaluRahmanfrkp"
+# ------------------------------------------------------
+# GLOBALS
+# ------------------------------------------------------
+WINDOW_X = 0
+WINDOW_Y = 0
+bot_running = False
+GAME_TITLE = "LDPlayer"
 
-# SPEED CONFIG
-CLICK_DELAY = (0.02, 0.05)
-SCAN_DELAY  = (0.08, 0.15)
-MAX_DONATE_TIME = 1.4
+# ------------------------------------------------------
+# RELATIVE REGIONS
+# ------------------------------------------------------
 
-RANDOM_MOUSE = True
-MOUSE_CHANCE = 0.25
+# Chat open/close
+CHAT_OPEN = (49, 334)
+CHAT_CLOSE = (487, 335)
 
-# ======================================================
-#  THRESHOLDS — VERY IMPORTANT
-# ======================================================
-THRESHOLDS = {
-    "troop": 0.58,     # your match score = ~0.617 → must be < that
-    "spell": 0.60,
-    "siege": 0.60
-}
+# Donation button region
+DONATION_REGION_REL = (7, 82, 443, 559)
 
-# ======================================================
-#  MULTI CLICK TABLE
-# ======================================================
-MULTI_CLICK = {
-    "archer": 4, "barbarian": 4, "goblin": 4,
-    "wizard": 2, "giant": 2, "wallbreaker": 2,
-    "minion": 3,
+# Previous donation alert
+PREV_REGION_REL = (410, 100, 37, 45)
+PREVIOUS_DONATION_IMG = "misc/previous_donation.png"
 
-    # Single-unit troops
-    "dragon": 1, "pekka": 1, "healer": 1,
-    "electro_titan": 1, "yeti": 1, "hog": 1,
-    "valkyrie": 1, "root_rider": 1, "edrag": 1,
-    "dragon_rider": 1,
+# Next donation alert
+NEXT_REGION_REL = (408, 590, 38, 46)
+NEXT_DONATION_IMG = "misc/next_donation.png"
 
-    # Spells
-    "lightning": 1, "rage": 1, "freeze": 1, "jump": 1,
-    "heal": 1, "poison": 1, "quake": 1, "invisibility": 1,
-    "haste": 1, "bat": 1, "skeleton": 1, "recall": 1,
-    "overgrowth": 1, "iceblock": 1,
+# Donation popup region
+DONATION_POPUP_REL = (482, 149, 609, 370)
 
-    # Siege machines
-    "wall_wrecker": 1, "battle_blimp": 1, "stone_slammer": 1,
-    "siege_barracks": 1, "log_launcher": 1, "flame_flinger": 1,
-    "battle_drill": 1,
-}
+# Exit donation popup
+EXIT_DONATION = (1156, 366)
 
-# ======================================================
-#  LOAD PNG IMAGES
-# ======================================================
-loaded_misc = {}
-loaded_troops = {}
+# Donation button image
+DONATION_BUTTON_IMG = "misc/donate_button.png"
 
-def preload_images():
-    for f in os.listdir("misc"):
-        if f.endswith(".png"):
-            loaded_misc[f] = cv2.imread(os.path.join("misc", f), cv2.IMREAD_COLOR)
+# ------------------------------------------------------
+# TROOPS
+# ------------------------------------------------------
+TROOPS = [
+    {
+        "name": "dark_troop",
+        "active": "misc/donate_dark_active.png",
+        "inactive": "misc/donate_dark_inactive.png"
+    },
+    {
+        "name": "elixir_troop",
+        "active": "misc/donate_elixir_active.png",
+        "inactive": "misc/donate_elixir_inactive.png"
+    },
+    {
+        "name": "dark_spell",
+        "active": "misc/donate_dark_spell_active.png",
+        "inactive": "misc/donate_dark_inactive.png"
+    },
+    {
+        "name": "elixir_spell",
+        "active": "misc/donate_elixir_spell_active.png",
+        "inactive": "misc/donate_elixir_spell_inactive.png"
+    }
+]
 
-    for f in os.listdir("troops"):
-        if f.endswith(".png"):
-            loaded_troops[f] = cv2.imread(os.path.join("troops", f), cv2.IMREAD_COLOR)
+# ------------------------------------------------------
+# RANDOM FALLBACK CLICK LOCATIONS (RELATIVE)
+# ------------------------------------------------------
+RANDOM_FALLBACK = [
+    (617, 451), (689, 451), (764, 452), (863, 447),
+    (933, 449), (1032, 446), (533, 446), (522, 185),
+    (525, 294), (599, 298), (625, 197), (685, 200),
+    (690, 308), (767, 289), (780, 186), (859, 187),
+    (863, 292), (938, 297), (941, 202), (1044, 197),
+    (1044, 291)
+]
 
-    print(f"[+] Loaded {len(loaded_misc)} misc images")
-    print(f"[+] Loaded {len(loaded_troops)} troop images")
 
-# ======================================================
-#  ACTIVATE GAME WINDOW
-# ======================================================
-def activate_window():
+# ------------------------------------------------------
+# HELPER FUNCTIONS
+# ------------------------------------------------------
+def activate_game_window():
+    global WINDOW_X, WINDOW_Y
     try:
-        win = gw.getWindowsWithTitle(GAME_TITLE)[0]
+        wins = gw.getWindowsWithTitle(GAME_TITLE)
+        if not wins:
+            return False
+        win = wins[0]
         win.activate()
         win.restore()
-        time.sleep(0.4)
+        WINDOW_X, WINDOW_Y = win.left, win.top
         return True
     except:
-        print("❌ Game window not found!")
         return False
 
-# ======================================================
-#  SMART TEMPLATE MATCH (HSV + AUTO-RESIZE + COLOR CHECK)
-# ======================================================
-def match_template(img_file, region, threshold, is_troop=False):
-    """Detect troop/spell with correct color (skip grayscale icons)."""
 
+def abs_region(rel):
+    x, y, w, h = rel
+    return (WINDOW_X + x, WINDOW_Y + y, w, h)
+
+
+# ------------------------------------------------------
+# IMAGE FINDERS
+# ------------------------------------------------------
+def find_donation_button():
+    region = abs_region(DONATION_REGION_REL)
     try:
-        template = loaded_troops[img_file] if is_troop else loaded_misc[img_file]
-        th, tw = template.shape[:2]
-
-        # Resize for scaling accuracy
-        template_small = cv2.resize(template, (int(tw * 0.75), int(th * 0.75)))
-
-        # Convert to HSV
-        template_hsv = cv2.cvtColor(template_small, cv2.COLOR_BGR2HSV)
-        template_hsv = cv2.GaussianBlur(template_hsv, (3, 3), 0)
-
-        # Capture region
-        screenshot = pyautogui.screenshot(region=region)
-        scr_bgr = np.array(screenshot)
-        scr_hsv = cv2.cvtColor(scr_bgr, cv2.COLOR_BGR2HSV)
-        scr_hsv = cv2.GaussianBlur(scr_hsv, (3, 3), 0)
-
-        # Template match
-        res = cv2.matchTemplate(scr_hsv, template_hsv, cv2.TM_CCOEFF_NORMED)
-        _, max_val, _, max_loc = cv2.minMaxLoc(res)
-
-        if max_val < threshold:
-            return None
-
-        # Coordinates for clicking
-        cx = region[0] + max_loc[0] + template_small.shape[1] // 2
-        cy = region[1] + max_loc[1] + template_small.shape[0] // 2
-
-        # ======================================================
-        #  COLOR CHECK → DO NOT CLICK GRAYED TROOPS
-        # ======================================================
-        if is_troop:
-            x1 = max_loc[0]
-            y1 = max_loc[1]
-            x2 = x1 + template_small.shape[1]
-            y2 = y1 + template_small.shape[0]
-
-            troop_box = scr_hsv[y1:y2, x1:x2]
-            sat_mean = troop_box[:, :, 1].mean()  # saturation value
-
-            if sat_mean < 35:      # Gray icons have LOW saturation
-                return None        # SKIP GRAY TROOPS
-
-        return (cx, cy)
-
-    except Exception as e:
-        print("Error:", e)
+        return pyautogui.locateCenterOnScreen(
+            DONATION_BUTTON_IMG,
+            region=region,
+            confidence=0.78
+        )
+    except pyautogui.ImageNotFoundException:
+        return None
+    except:
         return None
 
-# ======================================================
-#  HUMAN-LIKE MOUSE
-# ======================================================
-def random_mouse():
-    if random.random() > MOUSE_CHANCE:
-        return
+
+
+def find_previous():
+    region = abs_region(PREV_REGION_REL)
     try:
-        win = gw.getWindowsWithTitle(GAME_TITLE)[0]
-        rx = random.randint(win.left+50, win.left+win.width-50)
-        ry = random.randint(win.top+50, win.top+win.height-50)
-        pyautogui.moveTo(rx, ry, duration=random.uniform(0.10, 0.24))
+        return pyautogui.locateCenterOnScreen(
+            PREVIOUS_DONATION_IMG,
+            region=region,
+            confidence=0.78
+        )
+    except pyautogui.ImageNotFoundException:
+        return None
     except:
-        pass
+        return None
 
-# ======================================================
-#  CLICK DONATE BUTTON
-# ======================================================
-def click_donate_button():
-    img = "donate_button.png"
-    if img not in loaded_misc:
-        print("❌ donate_button.png missing")
+
+
+def find_next():
+    region = abs_region(NEXT_REGION_REL)
+    try:
+        return pyautogui.locateCenterOnScreen(
+            NEXT_DONATION_IMG,
+            region=region,
+            confidence=0.78
+        )
+    except pyautogui.ImageNotFoundException:
+        return None
+    except:
+        return None
+
+
+
+# ------------------------------------------------------
+# COLOR CHECKER
+# ------------------------------------------------------
+def is_colored_pixel(x, y):
+    """Confirm troop icon is colored, not grayscale."""
+    
+    # Convert to int to avoid PyAutoGUI crash
+    x = int(x)
+    y = int(y)
+
+    snap = pyautogui.screenshot(region=(x - 3, y - 3, 6, 6))
+    img = cv2.cvtColor(np.array(snap), cv2.COLOR_BGR2RGB)
+
+    avg = img.mean(axis=(0, 1))
+    r, g, b = avg
+
+    # grayscale check
+    if abs(r - g) < 18 and abs(g - b) < 18:
         return False
 
-    pos = match_template(img, DONATE_BUTTON_REGION, 0.65, False)
-    if pos:
-        print("👉 DONATE CLICKED")
-        pyautogui.click(pos)
-        time.sleep(random.uniform(*CLICK_DELAY))
-        return True
-    return False
+    return True
 
-# ======================================================
-#  DETECT TROOP/SPELL
-# ======================================================
-def detect_position(img_file):
-    name = img_file.replace(".png", "").replace("troop_", "")
+def donation_popup_open():
+    """
+    Detect if donation popup is still open by checking for 'closed' indicator image.
+    If closed.png is visible → donation popup is closed.
+    If not visible → popup is still open.
+    """
+    region = abs_region(DONATION_POPUP_REL)
 
-    # Spell?
-    if name in MULTI_CLICK and MULTI_CLICK[name] == 1 and name in [
-        "lightning","rage","jump","freeze","heal","poison","quake",
-        "invisibility","haste","bat","skeleton","recall","overgrowth","iceblock"
-    ]:
-        return match_template(img_file, SPELL_REGION, THRESHOLDS["spell"], True)
+    try:
+        closed_found = pyautogui.locateOnScreen(
+            "misc/closed.png",
+            region=region,
+            confidence=0.85
+        )
+    except pyautogui.ImageNotFoundException:
+        closed_found = None
+    except:
+        closed_found = None
 
-    # Siege?
-    if name in ["wall_wrecker","battle_blimp","stone_slammer","siege_barracks",
-                "log_launcher","flame_flinger","battle_drill"]:
-        return match_template(img_file, TROOP_BAR_REGION, THRESHOLDS["siege"], True)
+    # If closed indicator found → popup is CLOSED
+    if closed_found:
+        return False
 
-    # Troop
-    return match_template(img_file, TROOP_BAR_REGION, THRESHOLDS["troop"], True)
+    # Otherwise popup is still OPEN
+    return True
 
-# ======================================================
-#  DONATE UNITS
-# ======================================================
-def donate_units():
-    start = time.time()
-    donated = 0
+# ------------------------------------------------------
+# TROOP DETECTION
+# ------------------------------------------------------
+def detect_troop(active_path, inactive_path):
+    region = abs_region(DONATION_POPUP_REL)
 
-    for img_file in loaded_troops:
-        if time.time() - start > MAX_DONATE_TIME:
-            break
+    try:
+        active = pyautogui.locateCenterOnScreen(
+            active_path, region=region, confidence=0.92
+        )
+    except pyautogui.ImageNotFoundException:
+        active = None
 
-        pos = detect_position(img_file)
+    try:
+        inactive = pyautogui.locateCenterOnScreen(
+            inactive_path, region=region, confidence=0.97
+        )
+    except pyautogui.ImageNotFoundException:
+        inactive = None
 
+    # inactive but no active = skip
+    if inactive and not active:
+        return None
+
+    if active and is_colored_pixel(active[0], active[1]):
+        return active
+
+    return None
+
+
+# ------------------------------------------------------
+# FALLBACK RANDOM TROOP CLICK LOGIC
+# ------------------------------------------------------
+def fallback_random_clicks():
+    print("⚠ No active troops found → Running fallback clicks")
+
+    for loc in RANDOM_FALLBACK:
+
+        # Before clicking, check if popup is still open
+        if not donation_popup_open():
+            print("❌ Donation popup closed → stopping fallback clicks")
+            return
+
+        clicks = random.randint(4, 9)
+
+        for _ in range(clicks):
+
+            # Stop instantly if popup disappears mid-click
+            if not donation_popup_open():
+                print("❌ Donation popup closed → stopping fallback clicks")
+                return
+
+            pyautogui.click(WINDOW_X + loc[0], WINDOW_Y + loc[1])
+            time.sleep(0.01)
+
+
+
+# ------------------------------------------------------
+# DONATION PROCESS
+# ------------------------------------------------------
+def perform_donation():
+    print("➡ Donation popup detected")
+    donated = False
+
+    for troop in TROOPS:
+        pos = detect_troop(troop["active"], troop["inactive"])
         if pos:
-            name = img_file.replace(".png", "").replace("troop_", "")
-            clicks = MULTI_CLICK.get(name, 1)
-
-            print("  ➜ Donating:", name)
-
-            for _ in range(clicks):
-                pyautogui.click(pos)
-                time.sleep(random.uniform(*CLICK_DELAY))
-
-            donated += clicks
-
-    return donated
-
-# ======================================================
-#  CLOSE WINDOW
-# ======================================================
-def close_window():
-    img = "close_donate.png"
-    if img not in loaded_misc:
-        return False
-
-    pos = match_template(img, TROOP_BAR_REGION, 0.60, False)
-    if pos:
-        pyautogui.click(pos)
-        time.sleep(0.1)
-        return True
-    return False
-
-# ======================================================
-#  MAIN LOOP
-# ======================================================
-def main():
-    preload_images()
-
-    if not activate_window():
-        return
-
-    total = 0
-    print("🤖 Donation Bot Running...")
-
-    while True:
-        try:
-            random_mouse()
-
-            if click_donate_button():
-                time.sleep(0.15)
-
-                donated = donate_units()
-                total += donated
-                print(f"✔ Donated: {donated} | Total: {total}")
-
-                close_window()
-
-            time.sleep(random.uniform(*SCAN_DELAY))
-
-        except KeyboardInterrupt:
-            print("🛑 Bot stopped")
+            print(f"✔ Donating {troop['name']}")
+            pyautogui.click(pos)
+            time.sleep(0.01)
+            donated = True
             break
+        if donation_popup_open():
+            pyautogui.click(WINDOW_X + EXIT_DONATION[0], WINDOW_Y + EXIT_DONATION[1])
+            time.sleep(0.2)
 
-        except:
-            print(traceback.format_exc())
+    # Close chat safely
+    pyautogui.click(WINDOW_X + CHAT_CLOSE[0], WINDOW_Y + CHAT_CLOSE[1])       
+    if not donated:
+        fallback_random_clicks()
+
+    # EXIT donation popup
+    pyautogui.click(WINDOW_X + EXIT_DONATION[0], WINDOW_Y + EXIT_DONATION[1])
+    time.sleep(0.5)
+    pyautogui.click(WINDOW_X + CHAT_CLOSE[0], WINDOW_Y + CHAT_CLOSE[1])
+    pyautogui.click(WINDOW_X + CHAT_OPEN[0], WINDOW_Y + CHAT_OPEN[1])
+
+
+
+# ------------------------------------------------------
+# MAIN LOOP
+# ------------------------------------------------------
+def donation_loop():
+    activate_game_window()
+    #time.sleep(0.5)
+
+    while bot_running:
+
+        # OPEN CHAT
+        pyautogui.click(WINDOW_X + CHAT_OPEN[0], WINDOW_Y + CHAT_OPEN[1])
+        time.sleep(1)
+
+        # TRY 1: normal donation button
+        pos = find_donation_button()
+
+        # TRY 2: previous donation
+        if not pos:
+            prev = find_previous()
+            if prev:
+                pyautogui.click(prev)
+                time.sleep(0.5)
+                pos = find_donation_button()
+
+        # TRY 3: next donation
+        if not pos:
+            nxt = find_next()
+            if nxt:
+                pyautogui.click(nxt)
+                time.sleep(0.5)
+                pos = find_donation_button()
+
+        # PROCESS DONATION
+        if pos:
+            pyautogui.click(pos)
+            time.sleep(0.01)
+            perform_donation()
+            continue
+
+        # NO DONATION FOUND
+        print("⏳ No donation → waiting 2 minutes")
+        for _ in range(1):
+            if not bot_running:
+                return
             time.sleep(1)
 
-if __name__ == "__main__":
-    main()
+        # CLOSE CHAT AFTER WAIT
+        pyautogui.click(WINDOW_X + CHAT_CLOSE[0], WINDOW_Y + CHAT_CLOSE[1])
+        rest = random.randint(1, 10)
+        time.sleep(rest)
+
+
+# ------------------------------------------------------
+# GUI
+# ------------------------------------------------------
+def start_bot():
+    global bot_running, bot_thread, start_time
+    if not bot_running:
+        bot_running = True
+        start_time = datetime.now()
+        status_label.config(text="Status: Running", fg="green")
+        update_timer()
+        bot_thread = threading.Thread(target=donation_loop, daemon=True)
+        bot_thread.start()
+
+
+def stop_bot():
+    global bot_running
+    bot_running = False
+    status_label.config(text="Status: Stopped", fg="red")
+    timer_label.config(text="Elapsed: 00:00:00")
+
+
+def update_timer():
+    if bot_running and start_time:
+        elapsed = datetime.now() - start_time
+        timer_label.config(text=f"Elapsed: {str(elapsed).split('.')[0]}")
+        root.after(1000, update_timer)
+
+
+def restart_bot():
+    stop_bot()
+    time.sleep(1)
+    start_bot()
+
+
+root = tk.Tk()
+root.title("COC Donation Bot")
+root.attributes("-topmost", True)
+root.geometry("190x160+1200+10")
+root.resizable(False, False)
+root.configure(bg="black")
+
+status_label = tk.Label(root, text="Status: Stopped", fg="red", bg="black")
+status_label.pack()
+timer_label = tk.Label(root, text="Elapsed: 00:00:00", fg="yellow", bg="black")
+timer_label.pack()
+
+tk.Button(root, text="Start", bg="green", fg="white", command=start_bot).pack(fill=tk.X)
+tk.Button(root, text="Stop", bg="red", fg="white", command=stop_bot).pack(fill=tk.X)
+tk.Button(root, text="Restart", bg="blue", fg="white", command=restart_bot).pack(fill=tk.X)
+
+root.mainloop()
