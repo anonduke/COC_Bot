@@ -22,10 +22,15 @@ GOLD_OFFSET    = (947,  58, 182, 27)
 ELIXIR_OFFSET  = (945, 121, 186, 31)
 
 BUILDER_AREA   = (581,  55,  76,  34)  # shows "X/Y" free/total builders
-LIST_AREA      = (437, 130, 202, 422)  # upgrade list popup region
-GOLD_BTN       = (681, 575,  98,  30)  # "Upgrade with Gold" button
-ELIXIR_BTN     = (811, 579, 105,  28)  # "Upgrade with Elixir" button
-CONFIRM_BTN    = (755, 590, 171, 59)  # "Confirm" button after upgrade
+LIST_AREA      = (412, 130, 227, 422)  # upgrade list popup region
+# NOTE: left edge shifted 25px further left (and widened by the same amount)
+# vs. the original (437, 130, 202, 422) — that crop sliced through the first
+# glyph of every unindented row ("Wall" -> "Vall", "Dark" -> "ark", "Gold" ->
+# "old"), which is why Tesseract never matched "wall" in the upgrade list.
+CONFIRM_BTN    = (755, 590, 171, 59)  # "Confirm" button on the single-button
+# upgrade dialog ("Upgrade Wall to Level N?") that opens after tapping a row
+# in the upgrades list — there's no separate Gold/Elixir choice step, so no
+# GOLD_BTN/ELIXIR_BTN constants are needed here.
 CLOSE_BTN      = (1125, 299,  40, 17) # dismiss/back button — escapes stuck screens
 # Wall cost
 WALL_PRICE = 8_000_000
@@ -423,11 +428,13 @@ def scan_list_for_wall(list_abs, attempt):
     else:
         print(f"  [SCAN] No words detected")
 
-    # Search for "wall"
+    # Search for "wall" — also accept "vall", the misread you get if the crop
+    # ever clips the leading "W" stroke again (see LIST_AREA note above).
     for i in range(n):
         word = data["text"][i].strip()
         conf = int(data["conf"][i])
-        if "wall" in word.lower() and conf > 20:
+        word_lower = word.lower()
+        if ("wall" in word_lower or "vall" in word_lower) and conf > 20:
             x = data["left"][i]
             y = data["top"][i]
             w = data["width"][i]
@@ -515,57 +522,161 @@ def find_and_click_wall():
 
 
 # ---------------------------------------------------------
-#  UPGRADE BUTTON CLICK  (gold priority → elixir fallback)
+#  UPGRADE BUTTON CLICK
 # ---------------------------------------------------------
-def click_upgrade_button(gold, elixir):
+def read_storage_retry(offset, label="resource", debug_name="debug.png", max_tries=4, delay=0.7):
+    """read_storage() wrapped with retries — the elixir bar in particular has
+    turned out to be OCR-flaky live (truncated reads like '2893' or '210'
+    from a real, correctly-changed number), and any single unretried read
+    that comes back 0 can poison success-detection downstream (0 always
+    looks like 'dropped to nothing'). Keeps trying until a plausible non-zero
+    read comes back, since real balances here are never actually 0."""
+    value = 0
+    for attempt in range(max_tries):
+        value = read_storage(offset, label=label, debug_name=debug_name)
+        if value > 0:
+            return value
+        print(f"[UPGRADE] {label} read as 0 (OCR miss?) — retry {attempt + 1}/{max_tries}")
+        time.sleep(delay)
+    return value
+
+def _read_resources_after_upgrade(max_tries=4, delay=0.9):
+    """Re-read gold/elixir after a Confirm click. Right after tapping Confirm
+    the resource bar can be briefly obscured by dialog-close animation, or
+    just OCR-flaky (elixir especially), which makes read_storage() come back
+    0 even though the real number is fine — that must never be treated as
+    'balance dropped to 0', so retry each currency independently until a
+    non-zero read comes back (real balances here are always well above 0)."""
+    gold_after = elixir_after = 0
+    for attempt in range(max_tries):
+        if gold_after == 0:
+            gold_after = read_storage(GOLD_OFFSET, label="GOLD_AFTER", debug_name="debug_gold_after.png")
+        if elixir_after == 0:
+            elixir_after = read_storage(ELIXIR_OFFSET, label="ELIXIR_AFTER", debug_name="debug_elixir_after.png")
+        if gold_after > 0 and elixir_after > 0:
+            return gold_after, elixir_after
+        print(f"[UPGRADE] Resource bar partially unreadable — retry {attempt + 1}/{max_tries}")
+        time.sleep(delay)
+    return gold_after, elixir_after
+
+# Fixed screen regions (relative to window) for the two dialog states we
+# need to tell apart. Both live-verified: title text is large/clear and OCRs
+# reliably, unlike the tiny "CONFIRM" button text or resource digit strings.
+MAIN_DIALOG_TITLE_AREA = (150, 55, 800, 55)   # "Upgrade Wall to Level N?"
+NEED_MORE_POPUP_AREA   = (280, 185, 650, 95)  # "You Need More Gold/Elixir"
+
+def _ocr_region_text(region_offset):
+    """OCR a fixed window-relative region, return lowercased text (or '' on
+    any failure — treated as 'not found' by callers, which is the safe
+    direction: if we can't confirm a popup is gone, we keep retrying rather
+    than assuming success)."""
+    try:
+        region = (WINDOW_X + region_offset[0], WINDOW_Y + region_offset[1],
+                   region_offset[2], region_offset[3])
+        img = pyautogui.screenshot(region=region)
+        return pytesseract.image_to_string(img, config="--oem 3 --psm 6").strip().lower()
+    except Exception:
+        return ""
+
+def _need_more_currency_popup_open():
+    """True if the 'You need more Gold/Elixir — buy with gems?' upsell is on
+    screen. Live-verified to appear when the specific wall being confirmed
+    needs more of a currency than is on hand, even though some OTHER
+    currency was sufficient overall — must be detected and backed out of
+    without ever tapping the gem-purchase button."""
+    text = _ocr_region_text(NEED_MORE_POPUP_AREA)
+    return "need" in text and ("more" in text or "elixir" in text or "gold" in text)
+
+def _main_upgrade_dialog_open():
+    """True if the 'Upgrade Wall to Level N?' confirmation dialog is still
+    showing (title bar still visible)."""
+    text = _ocr_region_text(MAIN_DIALOG_TITLE_AREA)
+    return "upgrade" in text or "level" in text
+
+def click_upgrade_button(gold, elixir, max_attempts=4):
     """
-    After the wall entry has been selected and the upgrade dialog is open,
-    click the correct button.  Gold is tried first; elixir is the fallback.
-    Verifies the spend actually happened by re-reading the resource afterward —
-    a click that misses the button (stale coords, dialog didn't open, etc.)
-    must NOT be reported as a successful upgrade.
+    Clicking the Wall row in the upgrades list opens a single "Upgrade Wall
+    to Level N?" dialog with ONE Confirm button — there is no separate
+    Gold/Elixir choice screen (the currency is fixed by building type and
+    already shown on the Confirm button itself). Live-verified against the
+    actual game: the old code clicked GOLD_BTN before CONFIRM_BTN, but that
+    first click landed in the dead space below the dialog's info panel and
+    dismissed it before Confirm ever registered — which is exactly why walls
+    were detected but never actually upgraded.
+
+    Also live-verified, two more failure modes this now guards against:
+      1. A single Confirm click is not 100% reliable — the dialog has an
+         open animation, and clicking while it's still settling can miss the
+         button entirely with no visible error. So this retries the click
+         (idempotent: if a prior click already succeeded and closed the
+         dialog, a stray extra click just taps empty village background).
+      2. gold/elixir being individually sufficient overall does NOT mean
+         THIS specific wall's required currency is sufficient — if it isn't,
+         confirming opens a "buy the missing amount with gems?" upsell
+         instead of upgrading. That must be detected and backed out of
+         safely (never tapping the gem-purchase button), not mistaken for
+         success.
+    Verifies state via two targeted OCR checks (title bar text) rather than
+    reading gold/elixir — the dialog's own panel covers the leading digits of
+    BOTH resource numbers while open, which is exactly why post-click balance
+    OCR kept coming back garbled ('2893', '210', empty) on genuinely
+    successful upgrades.
     """
     print(f"\n[UPGRADE] Gold={gold:,}  Elixir={elixir:,}  WallPrice={WALL_PRICE:,}")
+
+    if gold < WALL_PRICE and elixir < WALL_PRICE:
+        print("[UPGRADE] Neither gold nor elixir is sufficient.")
+        return "NOT_ENOUGH_RESOURCES"
 
     confirm_cx = WINDOW_X + CONFIRM_BTN[0] + CONFIRM_BTN[2] // 2
     confirm_cy = WINDOW_Y + CONFIRM_BTN[1] + CONFIRM_BTN[3] // 2
 
-    if gold >= WALL_PRICE:
-        cx = WINDOW_X + GOLD_BTN[0] + GOLD_BTN[2] // 2
-        cy = WINDOW_Y + GOLD_BTN[1] + GOLD_BTN[3] // 2
-        print(f"[UPGRADE] Sufficient GOLD — clicking Gold button at ({cx}, {cy})")
-        pyautogui.click(cx, cy)
-        time.sleep(0.8)
-        print(f"[UPGRADE] Clicking Confirm at ({confirm_cx}, {confirm_cy})")
+    dialog_closed = False
+    for attempt in range(1, max_attempts + 1):
+        print(f"[UPGRADE] Attempt {attempt}/{max_attempts}: clicking Confirm at ({confirm_cx}, {confirm_cy})")
         pyautogui.click(confirm_cx, confirm_cy)
-        time.sleep(1.0)
+        time.sleep(1.3)
 
-        gold_after = read_storage(GOLD_OFFSET, label="GOLD_AFTER", debug_name="debug_gold_after.png")
-        print(f"[UPGRADE] Gold before={gold:,}  after={gold_after:,}")
-        if gold_after <= gold - (WALL_PRICE // 2):
-            return "UPGRADED_WITH_GOLD"
-        print("[UPGRADE] Gold did not drop — click missed the button, upgrade NOT applied.")
+        if _need_more_currency_popup_open():
+            print("[UPGRADE] Insufficient-currency upsell popup detected for this wall — "
+                  "backing out without spending gems")
+            # Close whichever dialog is topmost, up to twice (popup, then the
+            # main dialog behind it), using image search rather than a fixed
+            # coordinate so it works regardless of the popup's exact size.
+            for _ in range(2):
+                pos = pyautogui.locateCenterOnScreen("Close_Btn.PNG", confidence=0.7)
+                if not pos:
+                    break
+                pyautogui.click(pos)
+                time.sleep(0.8)
+            return "NOT_ENOUGH_RESOURCES"
+
+        if not _main_upgrade_dialog_open():
+            print("[UPGRADE] Dialog closed — Confirm registered")
+            dialog_closed = True
+            break
+
+        print("[UPGRADE] Dialog still open — Confirm click missed, retrying")
+
+    if not dialog_closed:
+        print("[UPGRADE] Dialog still open after all attempts — upgrade NOT applied.")
         return "UPGRADE_CLICK_FAILED"
 
-    if elixir >= WALL_PRICE:
-        cx = WINDOW_X + ELIXIR_BTN[0] + ELIXIR_BTN[2] // 2
-        cy = WINDOW_Y + ELIXIR_BTN[1] + ELIXIR_BTN[3] // 2
-        print(f"[UPGRADE] Gold insufficient — using ELIXIR, clicking at ({cx}, {cy})")
-        pyautogui.click(cx, cy)
-        time.sleep(0.8)
-        print(f"[UPGRADE] Clicking Confirm at ({confirm_cx}, {confirm_cy})")
-        pyautogui.click(confirm_cx, confirm_cy)
-        time.sleep(1.0)
+    # Dialog is confirmed closed, so the resource bar is no longer obscured —
+    # read it once more purely to label which currency got spent. This is
+    # best-effort only: if OCR still can't get a clean read, the upgrade
+    # already succeeded regardless (per the dialog-closed check above).
+    gold_after, elixir_after = _read_resources_after_upgrade()
+    print(f"[UPGRADE] Gold before={gold:,} after={gold_after:,} | "
+          f"Elixir before={elixir:,} after={elixir_after:,}")
 
-        elixir_after = read_storage(ELIXIR_OFFSET, label="ELIXIR_AFTER", debug_name="debug_elixir_after.png")
-        print(f"[UPGRADE] Elixir before={elixir:,}  after={elixir_after:,}")
-        if elixir_after <= elixir - (WALL_PRICE // 2):
-            return "UPGRADED_WITH_ELIXIR"
-        print("[UPGRADE] Elixir did not drop — click missed the button, upgrade NOT applied.")
-        return "UPGRADE_CLICK_FAILED"
+    if gold_after and gold_after <= gold - (WALL_PRICE // 2):
+        return "UPGRADED_WITH_GOLD"
+    if elixir_after and elixir_after <= elixir - (WALL_PRICE // 2):
+        return "UPGRADED_WITH_ELIXIR"
 
-    print("[UPGRADE] Neither gold nor elixir is sufficient.")
-    return "NOT_ENOUGH_RESOURCES"
+    print("[UPGRADE] Upgrade succeeded (dialog closed) but currency used couldn't be determined")
+    return "UPGRADED"
 
 
 # ---------------------------------------------------------
@@ -606,10 +717,18 @@ def upgrade_wall():
     print("  WALL UPGRADE — FULL FLOW")
     print("=" * 55)
 
+    # Let the window/UI settle before the first OCR read — every read_storage
+    # call re-raises/re-focuses the window (see get_absolute_region), and
+    # reading immediately after that focus-switch was observed to produce
+    # flaky elixir reads even with retries.
+    time.sleep(0.5)
+
     # ── Step 1: read resources ─────────────────────────────
+    # Retried — a single flaky OCR read (elixir especially) coming back 0
+    # here would poison success-detection for the rest of this attempt.
     print("\n[STEP 1] Reading resources...")
-    gold   = read_storage(GOLD_OFFSET,   label="GOLD",   debug_name="debug_gold.png")
-    elixir = read_storage(ELIXIR_OFFSET, label="ELIXIR", debug_name="debug_elixir.png")
+    gold   = read_storage_retry(GOLD_OFFSET,   label="GOLD",   debug_name="debug_gold.png")
+    elixir = read_storage_retry(ELIXIR_OFFSET, label="ELIXIR", debug_name="debug_elixir.png")
 
     print(f"[STEP 1] Gold={gold:,}  Elixir={elixir:,}  WallPrice={WALL_PRICE:,}")
 
@@ -636,7 +755,7 @@ def upgrade_wall():
 
         # ── Step 4: upgrade dialog should now be open ──────────
         print("\n[STEP 4] Waiting for upgrade dialog...")
-        time.sleep(1.5)
+        time.sleep(2.0)  # dialog has an open animation; clicking too early misses Confirm
 
         return click_upgrade_button(gold, elixir)
     finally:
@@ -704,7 +823,7 @@ if __name__ == "__main__":
     if not activate_game_window():
         raise SystemExit("LDPlayer not found")
 
-    CONTINUE_ON  = {"UPGRADED_WITH_GOLD", "UPGRADED_WITH_ELIXIR"}
+    CONTINUE_ON  = {"UPGRADED_WITH_GOLD", "UPGRADED_WITH_ELIXIR", "UPGRADED"}
     MAX_OCR_FAIL = 3   # retries before giving up on builder OCR
 
     walls_upgraded = 0

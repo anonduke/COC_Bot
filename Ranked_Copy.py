@@ -1,6 +1,7 @@
 from datetime import datetime
 from random import randint
 import time
+import math
 import logging
 import pyautogui
 import pygetwindow as gw
@@ -40,7 +41,7 @@ timestamps: Dict[str, datetime] = {
 # Configuration dictionary
 CONFIG = {
     'goblin_attack': 0,
-    'min_gold_to_attack': 800000,
+    'min_gold_to_attack': 0,
     'max_attack_attempts': 20,
     'battle_wait_timeout': 30,
     'gold_region': (60, 125, 125, 25),  # Relative to WINDOW_X, WINDOW_Y
@@ -52,6 +53,8 @@ CONFIG = {
     'event_troops': False,      # Toggle deployment of the current event troop
     'event_troop_count': 10,    # Number of event troops to deploy (varies per event)
     'builder_base': False,      # Toggle Builder Base attack mode (different flow/troops)
+    'builder_cart_check_every': 5,  # Check the Builder Base elixir cart every N successful attacks
+    'ai_deploy': False,         # Toggle AI-aimed spell drops (heat-map + lead-ahead targeting)
 }
 
 # Global variables
@@ -256,6 +259,200 @@ def finishBattleAndGoHome():
             return True
         time.sleep(1)
 
+# ---------------------------------------------------------
+#  AI DEPLOY — heat-map + lead-ahead spell targeting (rage only)
+# ---------------------------------------------------------
+# Opt-in (CONFIG['ai_deploy']) replacement for the fixed rage spell
+# coordinate list. Fixed positions can't account for where the troop pack
+# actually ends up on a given base, so rage sometimes buffed empty ground
+# instead of the actual troops. This instead: screenshots the battlefield,
+# diffs two quick samples to find where the troop mass currently is AND
+# which way it's moving, then aims 3-7 tiles ahead of it along that
+# direction (accounting for the time this analysis itself takes) — and
+# never within AI_MIN_SPELL_SEPARATION_PX of a spell already dropped this
+# attack. Every entry point falls back to the existing fixed-position
+# behavior on any failure, so this can never break the normal attack flow —
+# worst case it behaves exactly as before.
+#
+# Freeze deliberately does NOT use this — see the note by
+# AI_MIN_SPELL_SEPARATION_PX below for why.
+AI_BATTLE_REGION = (257, 36, 1047 - 257, 583 - 36)  # same area as capture_battlefield()
+AI_TILE_PX = 22          # approx on-screen px per base tile at the standard battle zoom — tune if drops land short/long
+AI_LEAD_TILES_RAGE = (3, 7)     # rage: buff troops close to where they are now — live-verified working well
+# Freeze always uses the fixed freeze_spell_positions list, never AI Deploy —
+# without real defense detection, an AI-aimed freeze can only guess how far
+# ahead the nearest defense is, and a miss (landing outside the wall on
+# empty ground) wastes the whole spell. Rage doesn't have this problem since
+# it just needs to catch the troops themselves.
+AI_MIN_SPELL_SEPARATION_PX = 70  # never drop two spells closer than this to each other
+AI_CLICK_DELAY_ESTIMATE = 0.3    # rough extra seconds between "done analyzing" and the click landing
+
+def _ai_capture_gray():
+    """Screenshot the battlefield region as grayscale, for frame differencing.
+    Returns None on failure so callers can fall back cleanly."""
+    try:
+        if not activate_game_window():
+            return None
+        region = (WINDOW_X + AI_BATTLE_REGION[0], WINDOW_Y + AI_BATTLE_REGION[1],
+                  AI_BATTLE_REGION[2], AI_BATTLE_REGION[3])
+        img = pyautogui.screenshot(region=region)
+        gray = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2GRAY)
+        return gray
+    except Exception:
+        logging.error(f"AI Deploy: capture failed: {traceback.format_exc()}")
+        return None
+
+def _ai_troop_mass_centroid(before_gray, after_gray):
+    """Frame-difference two battlefield captures to isolate what changed
+    (i.e. troops that weren't there in `before` — buildings/terrain are
+    static so they cancel out). Returns (cx, cy) in region-local pixels, or
+    None if too little changed to trust there's a real troop cluster there."""
+    try:
+        diff = cv2.absdiff(before_gray, after_gray)
+        _, mask = cv2.threshold(diff, 30, 255, cv2.THRESH_BINARY)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+        ys, xs = np.nonzero(mask)
+        if len(xs) < 40:
+            return None
+        return float(np.mean(xs)), float(np.mean(ys))
+    except Exception:
+        logging.error(f"AI Deploy: centroid calc failed: {traceback.format_exc()}")
+        return None
+
+def ai_compute_spell_drop(prior_points, lead_tiles=AI_LEAD_TILES_RAGE):
+    """Core AI Deploy targeting. Takes two quick battlefield samples to find
+    the troop mass's current position and velocity, extrapolates forward to
+    where it'll be by the time a spell actually lands (tile-lead distance +
+    velocity * remaining processing/click time), and nudges the result away
+    from any previously-used drop point this attack. `lead_tiles` controls
+    how far ahead to aim — small for rage (buff the troops where they are),
+    large for freeze (freeze is wasted on troops; it needs to reach a
+    defense further ahead). Returns an absolute (screen_x, screen_y) click
+    target, or None if it couldn't confidently find troops (caller should
+    fall back to a fixed position)."""
+    t_start = time.time()
+    before = _ai_capture_gray()
+    if before is None:
+        return None
+
+    time.sleep(0.5)
+    after1 = _ai_capture_gray()
+    if after1 is None:
+        return None
+    pos1 = _ai_troop_mass_centroid(before, after1)
+    if not pos1:
+        logging.info("AI Deploy: no troop mass detected yet")
+        return None
+
+    time.sleep(0.5)
+    after2 = _ai_capture_gray()
+    if after2 is None:
+        return None
+    pos2 = _ai_troop_mass_centroid(after1, after2)
+
+    cx1, cy1 = pos1
+    if pos2:
+        cx2, cy2 = pos2
+        dx, dy = cx2 - cx1, cy2 - cy1
+        dist = math.hypot(dx, dy)
+        elapsed = max(0.1, time.time() - t_start - 0.5)  # time over which that velocity was measured
+        if dist > 1:
+            dir_x, dir_y = dx / dist, dy / dist
+            speed = dist / elapsed  # px/sec
+        else:
+            dir_x, dir_y, speed = 0.0, 0.0, 0.0
+        base_x, base_y = cx2, cy2
+    else:
+        dir_x, dir_y, speed = 0.0, 0.0, 0.0
+        base_x, base_y = cx1, cy1
+
+    if dir_x == 0 and dir_y == 0:
+        # No measurable movement between samples (troops just landed, or
+        # camera settled) — head toward the middle of the battlefield
+        # instead of leaving the spell sitting right on top of the troops.
+        # The base's higher-value stuff is typically more central than
+        # wherever troops are dropped in from.
+        region_cx, region_cy = AI_BATTLE_REGION[2] / 2, AI_BATTLE_REGION[3] / 2
+        ddx, ddy = region_cx - base_x, region_cy - base_y
+        ddist = math.hypot(ddx, ddy)
+        if ddist > 1:
+            dir_x, dir_y = ddx / ddist, ddy / ddist
+
+    tiles_ahead = randint(*lead_tiles)
+    lead_px = tiles_ahead * AI_TILE_PX
+    # Compensate for the time still left between "now" and the click actually
+    # registering — otherwise a fast-moving pack outruns a lead computed only
+    # from the analysis window.
+    extra_px = speed * AI_CLICK_DELAY_ESTIMATE
+
+    target_x = base_x + dir_x * (lead_px + extra_px)
+    target_y = base_y + dir_y * (lead_px + extra_px)
+
+    # Stay inside the captured region — bounds re-applied after every push
+    # below too, since a click outside the game window entirely (e.g. a
+    # negative screen coordinate) is not just "a bad drop", it's a click on
+    # whatever's behind/above the game, which must never happen.
+    region_left = WINDOW_X + AI_BATTLE_REGION[0] + 15
+    region_right = WINDOW_X + AI_BATTLE_REGION[0] + AI_BATTLE_REGION[2] - 15
+    region_top = WINDOW_Y + AI_BATTLE_REGION[1] + 15
+    region_bottom = WINDOW_Y + AI_BATTLE_REGION[1] + AI_BATTLE_REGION[3] - 15
+
+    def _clamp(sx, sy):
+        return (max(region_left, min(region_right, sx)),
+                max(region_top, min(region_bottom, sy)))
+
+    screen_x = WINDOW_X + AI_BATTLE_REGION[0] + int(target_x)
+    screen_y = WINDOW_Y + AI_BATTLE_REGION[1] + int(target_y)
+    screen_x, screen_y = _clamp(screen_x, screen_y)
+
+    # Never stack a new spell on top of one already dropped this attack —
+    # push it further along the direction of travel until it clears, capped
+    # so this can't loop forever. Re-clamped every iteration: live-verified
+    # that without this, the push could walk the point past the window edge
+    # (e.g. a negative screen Y) and the resulting click lands outside the
+    # game entirely instead of just being a suboptimal spot.
+    for _ in range(4):
+        too_close = next(
+            ((px, py) for px, py in prior_points
+             if math.hypot(screen_x - px, screen_y - py) < AI_MIN_SPELL_SEPARATION_PX),
+            None
+        )
+        if not too_close:
+            break
+        if dir_x == 0 and dir_y == 0:
+            dir_x, dir_y = 1.0, 0.0  # no known direction — just push sideways
+        screen_x += int(dir_x * AI_MIN_SPELL_SEPARATION_PX)
+        screen_y += int(dir_y * AI_MIN_SPELL_SEPARATION_PX)
+        screen_x, screen_y = _clamp(screen_x, screen_y)
+
+    logging.info(f"AI Deploy: troop mass ~({int(base_x)},{int(base_y)}) region-local, "
+                f"dir=({dir_x:.2f},{dir_y:.2f}) speed={speed:.0f}px/s, "
+                f"{tiles_ahead} tiles ahead -> click ({screen_x},{screen_y})")
+    return screen_x, screen_y
+
+def _deploy_spell_batch(fixed_positions, ai_prior_points, jitter=5, delay=0.2, lead_tiles=AI_LEAD_TILES_RAGE):
+    """Deploy len(fixed_positions) spells (icon must already be selected by
+    the caller). Uses AI Deploy targeting per-drop when CONFIG['ai_deploy']
+    is on, falling back to the given fixed position (with the usual jitter)
+    for any individual drop the AI can't confidently place — so a bad read
+    never skips a spell outright. Currently only used for rage — freeze
+    always uses its own plain fixed-position loop, never this."""
+    for fx, fy in fixed_positions:
+        pt = None
+        if CONFIG['ai_deploy']:
+            try:
+                pt = ai_compute_spell_drop(ai_prior_points, lead_tiles=lead_tiles)
+            except Exception:
+                logging.error(f"AI Deploy: drop computation failed, falling back: {traceback.format_exc()}")
+                pt = None
+            if not pt:
+                logging.info("AI Deploy: falling back to fixed position for this spell")
+        if not pt:
+            pt = (fx + randint(-jitter, jitter), fy + randint(-jitter, jitter))
+        pyautogui.click(pt[0], pt[1])
+        ai_prior_points.append(pt)
+        time.sleep(delay)
+
 def deployTroops():
     """Deploy troops with strategic positioning and slight randomness."""
     logging.debug("Deploying troops")
@@ -389,29 +586,32 @@ def deployTroops():
             pyautogui.click(baby_dragon_position[0] + randint(-5, 5), baby_dragon_position[1] + randint(-5, 5))
         # Wait **3 seconds**, then deploy **first 2 Rage Spells**
         time.sleep(3)
-        #deploy_rage_smart()
-        # Deploy **Freeze Spells** together
-        #time.sleep(4)
-        #deploy_rage_smart()
-        #deploy_freeze_smart()
+        # Tracks every AI-Deploy spell drop point this attack (screen coords)
+        # so a later rage cast never stacks on an earlier one. Freeze doesn't
+        # use AI Deploy (see note above), so it doesn't touch this list.
+        ai_spell_drop_points = []
         pyautogui.click(locate_image("troops/rage_spell.PNG"))
         time.sleep(0.5)
-        for x, y in rage_spell_positions[:2]:
-            pyautogui.click(x + randint(-5, 5), y + randint(-5, 5))
-            time.sleep(0.2)
+        _deploy_spell_batch(rage_spell_positions[:2], ai_spell_drop_points)
 
         # Wait **4 seconds**, then deploy **next 2 Rage Spells**
         time.sleep(9)
-        for x, y in rage_spell_positions[2:]:
-            pyautogui.click(x + randint(-5, 5), y + randint(-5, 5))
-            time.sleep(0.2)
+        _deploy_spell_batch(rage_spell_positions[2:], ai_spell_drop_points)
 
-        # Deploy **Freeze Spells** together
+        # Deploy **Freeze Spells** together — always the fixed positions,
+        # never AI Deploy. Without real defense detection, an AI-aimed
+        # freeze can only guess how far ahead the nearest defense is, and a
+        # miss (freeze landing outside the wall on empty ground) wastes the
+        # whole spell — worse than the original coordinates, which are at
+        # least known-reasonable spots. Rage doesn't have this problem since
+        # it just needs to catch the troops themselves, which AI Deploy
+        # reliably found in testing.
         time.sleep(1)
         pyautogui.click(locate_image("troops/freez_spell.PNG"))
         time.sleep(0.5)
         for x, y in freeze_spell_positions:
             pyautogui.click(x + randint(-5, 5), y + randint(-5, 5))
+            time.sleep(0.2)
 
         # Deploy **New Troop** (after all troops, spells, and heroes)
         new_troop_pos = locate_image("troops/newtroop.png")
@@ -475,7 +675,7 @@ def startAttackingBuilder():
 
         logging.info("Waiting for builder battle screen...")
         for i in range(CONFIG['battle_wait_timeout']):
-            if locate_image("misc/b_battle.PNG"):
+            if _locate_any_image(["misc/b_battle.PNG", "misc/b_battle_1.PNG"]):
                 logging.info("Builder battle screen detected")
                 # Zoom out immediately so the whole village is visible before
                 # any troop is deployed — deploy coordinates depend on this.
@@ -502,14 +702,28 @@ def _b_hero_heal_loop(hero_pos, stop_event):
 
 def _locate_builder_button(image_path, label, confidences=(0.8, 0.7, 0.6), retries=2):
     """Search for a builder-base UI button, sweeping through looser confidence
-    levels before giving up. Logs clearly on both success and total failure so
+    levels before giving up. image_path may be a single path or a list of
+    variant paths (e.g. b_hero.PNG OR b_hero_1.PNG) — the first one found at
+    any confidence wins. Logs clearly on both success and total failure so
     deploy problems show up in the log instead of failing silently."""
+    paths = [image_path] if isinstance(image_path, str) else list(image_path)
     for confidence in confidences:
-        pos = locate_image(image_path, confidence=confidence, retries=retries)
+        for path in paths:
+            pos = locate_image(path, confidence=confidence, retries=retries)
+            if pos:
+                logging.info(f"{label} found via '{path}' at {pos} (confidence={confidence})")
+                return pos
+    logging.error(f"{label} NOT found (tried {paths}) after trying confidences {confidences}")
+    return None
+
+def _locate_any_image(image_paths, confidence=0.8, retries=1):
+    """Try each image path in turn, returning the first on-screen match.
+    Used where the game shows one of a few visually different variants of the
+    same screen/button (e.g. b_battle.PNG OR b_battle_1.PNG)."""
+    for path in image_paths:
+        pos = locate_image(path, confidence=confidence, retries=retries)
         if pos:
-            logging.info(f"{label} found at {pos} (confidence={confidence})")
             return pos
-    logging.error(f"{label} NOT found ('{image_path}') after trying confidences {confidences}")
     return None
 
 def _locate_all_builder_buttons(image_path, confidence=0.75, max_results=3, min_distance=30):
@@ -562,7 +776,7 @@ def deployTroopsBuilder():
             logging.error("Giants NOT deployed — button not found")
 
         # Deploy Hero
-        hero_pos = _locate_builder_button("heros/b_hero.PNG", "Hero button")
+        hero_pos = _locate_builder_button(["heros/b_hero.PNG", "heros/b_hero_1.PNG"], "Hero button")
         if hero_pos:
             try:
                 pyautogui.click(hero_pos)
@@ -682,6 +896,77 @@ def attackBuilderBase():
         logging.error(f"Unexpected error in attackBuilderBase: {traceback.format_exc()}")
         if hero_heal_stop:
             hero_heal_stop.set()
+        return False
+
+def zoomOutBuilderVillageHome():
+    """Zoom out fully on the Builder Base HOME village view (as opposed to
+    zoomOutBuilderBase(), which zooms the attack battlefield). No center-tap
+    afterward — live-verified that tapping the window center to "center the
+    base" can land on a building (Wall, Gold Storage, ...) and pop open its
+    info/upgrade tray; the Builder Base map is small enough to already fit
+    on screen without needing to be re-centered anyway."""
+    logging.debug("Zooming out builder base village")
+    try:
+        if not activate_game_window():
+            return False
+        pyautogui.keyDown('ctrl')
+        time.sleep(0.1)
+        for _ in range(5):
+            pyautogui.scroll(-500)
+            time.sleep(0.2)
+        pyautogui.keyUp('ctrl')
+        time.sleep(0.3)
+        logging.info("Builder base village zoomed out")
+        return True
+    except Exception:
+        logging.error(f"Failed to zoom out builder base village: {traceback.format_exc()}")
+        try:
+            pyautogui.keyUp('ctrl')
+        except Exception:
+            pass
+        return False
+
+def collectBuilderElixirCart():
+    """Every CONFIG['builder_cart_check_every'] Builder Base attacks: zoom
+    out to see the whole village, find the elixir cart (its on-screen
+    appearance varies, so try every known variant), collect it, then close
+    the collection popup."""
+    logging.info("Checking for Builder Base elixir cart")
+    try:
+        if not zoomOutBuilderVillageHome():
+            logging.error("Could not zoom out builder base village — skipping elixir cart check")
+            return False
+
+        cart_pos = _locate_builder_button(
+            ["misc/elixir_cart.PNG", "misc/elixir_cart_1.PNG", "misc/elixir_cart_2.PNG"],
+            "Elixir cart"
+        )
+        if not cart_pos:
+            logging.info("No elixir cart visible — nothing to collect")
+            return False
+
+        pyautogui.click(cart_pos)
+        time.sleep(1)
+
+        collect_pos = locate_image("misc/collect.PNG")
+        if collect_pos:
+            pyautogui.click(collect_pos)
+            logging.info("Elixir cart collected")
+            time.sleep(1)
+        else:
+            logging.warning("Collect button not found after clicking elixir cart")
+
+        close_pos = locate_image("misc/elixir_cart_close.PNG")
+        if close_pos:
+            pyautogui.click(close_pos)
+            time.sleep(0.5)
+            logging.info("Elixir cart popup closed")
+        else:
+            logging.warning("Elixir cart close button not found")
+
+        return True
+    except Exception:
+        logging.error(f"Unexpected error in collectBuilderElixirCart: {traceback.format_exc()}")
         return False
 
 def attack():
@@ -1120,7 +1405,7 @@ def run_wall_upgrades():
         return
 
     logging.info("Wall upgrade check triggered")
-    CONTINUE_ON = {"UPGRADED_WITH_GOLD", "UPGRADED_WITH_ELIXIR"}
+    CONTINUE_ON = {"UPGRADED_WITH_GOLD", "UPGRADED_WITH_ELIXIR", "UPGRADED"}
     upgraded = 0
 
     try:
@@ -1194,6 +1479,99 @@ if __name__ == "__main__":
         )
         logging.info(f"Builder base mode: {CONFIG['builder_base']}")
 
+    def toggle_ai_deploy():
+        CONFIG['ai_deploy'] = not CONFIG['ai_deploy']
+        ai_deploy_btn.config(
+            text=f"AI Deploy: {'ON' if CONFIG['ai_deploy'] else 'OFF'}",
+            bg="#0af" if CONFIG['ai_deploy'] else "gray",
+        )
+        logging.info(f"AI Deploy: {CONFIG['ai_deploy']}")
+
+    def open_settings_window():
+        """All the configurable variables live in a separate popup now,
+        opened via the gear button — keeps the main window to just the
+        toggles/status/controls. A single 'Save & Exit' button validates and
+        applies every field, then closes the popup; on a bad value it stays
+        open and shows what needs fixing instead of closing."""
+        win = tk.Toplevel(root)
+        win.title("Settings")
+        win.attributes("-topmost", True)
+        win.configure(bg="black")
+        win.resizable(False, False)
+        win.geometry(f"+{root.winfo_x() - 190}+{root.winfo_y()}")
+        win.transient(root)
+        win.grab_set()
+
+        tk.Label(win, text="⚙ Settings", fg="white", bg="black",
+                 font=("Arial", 11, "bold")).pack(pady=(10, 6))
+
+        def _row(label, default):
+            row = tk.Frame(win, bg="black")
+            row.pack(fill=tk.X, padx=10, pady=3)
+            tk.Label(row, text=label, fg="white", bg="black",
+                     font=("Arial", 9), width=16, anchor="w").pack(side=tk.LEFT)
+            var = tk.StringVar(value=str(default))
+            tk.Entry(row, textvariable=var, font=("Arial", 9),
+                     bg="#222", fg="white", insertbackground="white",
+                     relief="flat", width=10).pack(side=tk.RIGHT)
+            return var
+
+        wall_price_var  = _row("Wall Price", _wall.WALL_PRICE if WALL_UPGRADE_AVAILABLE else 2_400_000)
+        min_gold_var    = _row("Min Gold Atk", CONFIG['min_gold_to_attack'])
+        check_every_var = _row("Wall Check Every(N)", CONFIG['wall_check_every'])
+        event_count_var = _row("Event Troops#", CONFIG['event_troop_count'])
+        cart_every_var  = _row("Cart Check Every(N)", CONFIG['builder_cart_check_every'])
+
+        err_lbl = tk.Label(win, text="", fg="#f55", bg="black",
+                           font=("Arial", 8), wraplength=210, justify="left")
+        err_lbl.pack(padx=10, pady=(4, 0))
+
+        def save_and_exit():
+            errors = []
+            try:
+                wp = int(wall_price_var.get().replace(",", "").replace("_", ""))
+                if WALL_UPGRADE_AVAILABLE:
+                    _wall.WALL_PRICE = wp
+            except ValueError:
+                errors.append("Wall Price")
+
+            try:
+                mg = int(min_gold_var.get().replace(",", "").replace("_", ""))
+                CONFIG['min_gold_to_attack'] = mg
+            except ValueError:
+                errors.append("Min Gold")
+
+            try:
+                ce = int(check_every_var.get())
+                CONFIG['wall_check_every'] = max(1, ce)
+            except ValueError:
+                errors.append("Wall Check Every")
+
+            try:
+                ec = int(event_count_var.get())
+                CONFIG['event_troop_count'] = max(1, ec)
+            except ValueError:
+                errors.append("Event Troops#")
+
+            try:
+                cce = int(cart_every_var.get())
+                CONFIG['builder_cart_check_every'] = max(1, cce)
+            except ValueError:
+                errors.append("Cart Check Every")
+
+            if errors:
+                err_lbl.config(text=f"Bad value: {', '.join(errors)}")
+                return
+
+            logging.info(f"Settings saved — WallPrice={_wall.WALL_PRICE if WALL_UPGRADE_AVAILABLE else 'N/A'} "
+                         f"MinGold={CONFIG['min_gold_to_attack']} WallCheckEvery={CONFIG['wall_check_every']} "
+                         f"EventTroopCount={CONFIG['event_troop_count']} "
+                         f"CartCheckEvery={CONFIG['builder_cart_check_every']}")
+            win.destroy()
+
+        tk.Button(win, text="Save & Exit", command=save_and_exit,
+                  bg="#2a7", fg="white", font=("Arial", 9, "bold")).pack(fill=tk.X, padx=10, pady=(8, 12))
+
     def start_bot():
         global bot_running, bot_thread, start_time, _monitor_stop_evt
         if not bot_running:
@@ -1248,6 +1626,11 @@ if __name__ == "__main__":
             logging.info("Initial wall upgrade check at session start")
             run_wall_upgrades()
 
+        # Initial Builder Base elixir cart check before the first attack
+        if CONFIG['builder_base']:
+            logging.info("Initial Builder Base elixir cart check at session start")
+            collectBuilderElixirCart()
+
         session_start = datetime.now()
         while bot_running:
             try:
@@ -1271,6 +1654,13 @@ if __name__ == "__main__":
                         run_wall_upgrades()
                         _update_heartbeat()
 
+                    # Builder Base elixir cart check every N successful attacks
+                    cn = CONFIG['builder_cart_check_every']
+                    if (CONFIG['builder_base'] and cn > 0 and attack_count % cn == 0):
+                        logging.info(f"Attack #{attack_count}: checking Builder Base elixir cart")
+                        collectBuilderElixirCart()
+                        _update_heartbeat()
+
                 time.sleep(30)
             except KeyboardInterrupt:
                 break
@@ -1282,7 +1672,7 @@ if __name__ == "__main__":
     root = tk.Tk()
     root.title("C")
     root.attributes("-topmost", True)
-    root.geometry("140x430+1220+10")
+    root.geometry("140x335+1220+10")
     root.resizable(False, False)
     root.configure(bg="black")
 
@@ -1322,72 +1712,18 @@ if __name__ == "__main__":
                                  bg="gray", fg="white", font=("Arial", 9, "bold"))
     builder_base_btn.pack(fill=tk.X, padx=4, pady=1)
 
-    # ── Editable settings ─────────────────────────────────────────────────
+    ai_deploy_btn = tk.Button(root, text="AI Deploy: OFF", command=toggle_ai_deploy,
+                              bg="gray", fg="white", font=("Arial", 9, "bold"))
+    ai_deploy_btn.pack(fill=tk.X, padx=4, pady=1)
+
+    # ── Settings (gear) button — opens the popup with all configurable
+    # variables, replacing the old always-visible inline settings block ────
     sep = tk.Frame(root, height=1, bg="#444")
     sep.pack(fill=tk.X, padx=4, pady=4)
 
-    tk.Label(root, text="Settings", fg="#aaa", bg="black",
-             font=("Arial", 8, "bold")).pack()
-
-    def _setting_row(label, default):
-        """Helper: returns a tk.Entry pre-filled with *default*."""
-        row = tk.Frame(root, bg="black")
-        row.pack(fill=tk.X, padx=6, pady=1)
-        tk.Label(row, text=label, fg="white", bg="black",
-                 font=("Arial", 8), width=13, anchor="w").pack(side=tk.LEFT)
-        var = tk.StringVar(value=str(default))
-        entry = tk.Entry(row, textvariable=var, font=("Arial", 8),
-                         bg="#222", fg="white", insertbackground="white",
-                         relief="flat", width=9)
-        entry.pack(side=tk.RIGHT)
-        return var
-
-    wall_price_var    = _setting_row("Wall Price",     _wall.WALL_PRICE if WALL_UPGRADE_AVAILABLE else 2_400_000)
-    min_gold_var      = _setting_row("Min Gold Atk",   CONFIG['min_gold_to_attack'])
-    check_every_var   = _setting_row("Check Every(N)", CONFIG['wall_check_every'])
-    event_count_var   = _setting_row("Event Troops#",  CONFIG['event_troop_count'])
-
-    apply_lbl = tk.Label(root, text="", fg="#0f0", bg="black", font=("Arial", 8))
-    apply_lbl.pack()
-
-    def apply_settings():
-        errors = []
-        try:
-            wp = int(wall_price_var.get().replace(",", "").replace("_", ""))
-            if WALL_UPGRADE_AVAILABLE:
-                _wall.WALL_PRICE = wp
-        except ValueError:
-            errors.append("Wall Price")
-
-        try:
-            mg = int(min_gold_var.get().replace(",", "").replace("_", ""))
-            CONFIG['min_gold_to_attack'] = mg
-        except ValueError:
-            errors.append("Min Gold")
-
-        try:
-            ce = int(check_every_var.get())
-            CONFIG['wall_check_every'] = max(1, ce)
-        except ValueError:
-            errors.append("Check Every")
-
-        try:
-            ec = int(event_count_var.get())
-            CONFIG['event_troop_count'] = max(1, ec)
-        except ValueError:
-            errors.append("Event Troops#")
-
-        if errors:
-            apply_lbl.config(text=f"Bad value: {', '.join(errors)}", fg="red")
-        else:
-            apply_lbl.config(text="Applied!", fg="#0f0")
-            root.after(2000, lambda: apply_lbl.config(text=""))
-        logging.info(f"Settings applied — WallPrice={_wall.WALL_PRICE if WALL_UPGRADE_AVAILABLE else 'N/A'} "
-                     f"MinGold={CONFIG['min_gold_to_attack']} CheckEvery={CONFIG['wall_check_every']} "
-                     f"EventTroopCount={CONFIG['event_troop_count']}")
-
-    tk.Button(root, text="Apply Settings", command=apply_settings,
-              bg="#555", fg="white", font=("Arial", 8, "bold")).pack(fill=tk.X, padx=4, pady=2)
+    settings_btn = tk.Button(root, text="⚙ Settings", command=open_settings_window,
+                             bg="#333", fg="white", font=("Arial", 9, "bold"))
+    settings_btn.pack(fill=tk.X, padx=4, pady=1)
 
     sep2 = tk.Frame(root, height=1, bg="#444")
     sep2.pack(fill=tk.X, padx=4, pady=3)
