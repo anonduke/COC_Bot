@@ -10,6 +10,5 @@ instance
 .idea/
 logs/
 *.log
-*.png
-*.jpg
+
 
