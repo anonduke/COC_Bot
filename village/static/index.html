@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<title>Village Control</title>
+<link rel="stylesheet" href="/app.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%233987e5'/%3E%3Cpath d='M9 22l7-12 7 12z' fill='white'/%3E%3C/svg%3E">
+</head>
+<body>
+<div class="app">
+  <nav class="sidebar" aria-label="Sections">
+    <div class="brand">
+      <div class="brand-mark">V</div>
+      <div><div class="brand-name">Village Control</div><div class="brand-sub" id="brand-sub">COC bot</div></div>
+    </div>
+    <button class="nav-btn active" data-page="dashboard"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg><span>Dashboard</span></button>
+    <button class="nav-btn" data-page="queue"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 6h13M8 12h13M8 18h13"/><circle cx="4" cy="6" r="1.2"/><circle cx="4" cy="12" r="1.2"/><circle cx="4" cy="18" r="1.2"/></svg><span>Builder queue</span></button>
+    <button class="nav-btn" data-page="settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg><span>Settings</span></button>
+    <button class="nav-btn" data-page="notifications"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 8a6 6 0 1 1 12 0c0 7 3 8 3 8H3s3-1 3-8"/><path d="M10 20a2 2 0 0 0 4 0"/></svg><span>Alerts</span><span class="nav-badge hidden" id="nav-unread">0</span></button>
+    <div class="sidebar-foot" id="foot">—</div>
+  </nav>
+
+  <main class="main">
+    <div class="topbar">
+      <h1 id="page-title">Dashboard</h1>
+      <span class="spacer"></span>
+      <span class="pill" id="pill-emulator" title="Emulator state, checked every 20 s"><span class="dot"></span><span>Emulator…</span></span>
+      <span class="pill" id="pill-updated" title="Age of the latest village snapshot"><span class="dot"></span><span>—</span></span>
+      <button class="btn primary" id="btn-capture" title="Read the village from the game now (about a minute)">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg>
+        <span>Capture now</span></button>
+      <button class="icon-btn" id="btn-theme" title="Light / dark"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg></button>
+    </div>
+
+    <!-- ================= DASHBOARD ================= -->
+    <section id="page-dashboard">
+      <div class="grid cols-4" id="tiles"></div>
+
+      <div class="grid main-split section-gap">
+        <div class="card">
+          <div class="card-head"><h2>Builders</h2><span class="sub" id="builders-source"></span>
+            <span class="right"><button class="btn small ghost" id="toggle-builder-table">Table view</button></span></div>
+          <div class="hero-row">
+            <div>
+              <div class="hero-figure" id="free-figure">–</div>
+              <div class="hero-caption" id="free-caption">builders free</div>
+            </div>
+            <div class="hero-next">
+              <div class="muted" style="font-size:12.5px">Next builder free</div>
+              <div class="big num" id="next-free">–</div>
+              <div class="muted num" id="next-free-at"></div>
+            </div>
+          </div>
+          <div class="meter" id="builder-meter" aria-hidden="true"></div>
+          <div class="lanes section-gap" id="builder-lanes"></div>
+          <div class="section-gap hidden" id="builder-table"></div>
+        </div>
+
+        <div class="grid">
+          <div class="card">
+            <div class="card-head"><h2>Laboratory</h2></div>
+            <div class="mini-list" id="lab-list"></div>
+          </div>
+          <div class="card">
+            <div class="card-head"><h2>Pet House</h2></div>
+            <div class="mini-list" id="pet-list"></div>
+          </div>
+          <div class="card">
+            <div class="card-head"><h2>Helpers</h2></div>
+            <div class="mini-list" id="helper-list"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card section-gap">
+        <div class="card-head"><h2>Builder timeline</h2><span class="sub">next 72 hours · hover a bar for details</span></div>
+        <div class="timeline-wrap" id="dash-timeline"></div>
+      </div>
+
+      <div class="grid cols-3 section-gap">
+        <div class="card">
+          <div class="card-head"><h2>Village</h2></div>
+          <div id="village-facts" class="mini-list"></div>
+        </div>
+        <div class="card">
+          <div class="card-head"><h2>Free builders over time</h2><span class="sub">screen counter at each capture</span></div>
+          <div class="spark-wrap" id="free-history"></div>
+        </div>
+        <div class="card">
+          <div class="card-head"><h2>Latest alerts</h2><span class="right"><button class="btn small ghost" data-goto="notifications">All</button></span></div>
+          <div class="notes" id="dash-notes"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= QUEUE ================= -->
+    <section id="page-queue" class="hidden">
+      <div class="grid main-split">
+        <div class="card">
+          <div class="card-head"><h2>Upgrade queue</h2><span class="sub">drag to reorder · the first item gets the next free builder</span></div>
+          <div class="queue" id="queue"></div>
+        </div>
+        <div class="card">
+          <div class="card-head"><h2>Add to queue</h2><span class="sub" id="cat-sub"></span></div>
+          <input class="search" id="cat-search" placeholder="Search buildings, heroes, traps…" autocomplete="off">
+          <div class="chips" id="cat-chips">
+            <button class="chip active" data-kind="all">All</button>
+            <button class="chip" data-kind="hero">Heroes</button>
+            <button class="chip" data-kind="building">Buildings</button>
+            <button class="chip" data-kind="trap">Traps</button>
+            <button class="chip" data-kind="maxed">Show maxed</button>
+          </div>
+          <div class="cat-list" id="cat-list"></div>
+        </div>
+      </div>
+      <div class="card section-gap">
+        <div class="card-head"><h2>Projected schedule</h2>
+          <span class="sub">preview: queue order is priority; one upgrade per building or hero at a time; no resource limits yet</span>
+          <span class="right legend"><span><i style="background:var(--series-1)"></i>In progress</span><span><i style="background:var(--series-2)"></i>Planned</span></span></div>
+        <div class="timeline-wrap" id="plan-timeline"></div>
+      </div>
+    </section>
+
+    <!-- ================= SETTINGS ================= -->
+    <section id="page-settings" class="hidden">
+      <div class="grid" id="settings"></div>
+    </section>
+
+    <!-- ================= NOTIFICATIONS ================= -->
+    <section id="page-notifications" class="hidden">
+      <div class="card">
+        <div class="card-head"><h2>Alerts &amp; errors</h2><span class="sub" id="notes-sub"></span>
+          <span class="right"><button class="btn small" id="ack-all">Mark all as read</button></span></div>
+        <div class="notes" id="notes"></div>
+      </div>
+    </section>
+  </main>
+</div>
+<div class="tooltip hidden" id="tooltip" role="tooltip"></div>
+<div class="toasts" id="toasts" aria-live="polite"></div>
+<script src="/app.js"></script>
+</body>
+</html>

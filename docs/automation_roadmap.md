@@ -294,6 +294,16 @@ Code: `village/` package, tests in `tests/` (`python -m unittest discover -s tes
   - Predicted completions are checked against the real ones over 24 h. Tolerance is ±2 min, or flagged with the reason (helper, potion, manual).
 - **Acceptance:** forecasts within tolerance; any mismatch is explained in the log.
 
+#### Phase 3 progress (2026-11-14)
+- `village/builders.py`: forecast (free now, next free, per-job end), Builder's Apprentice boost model, `verify_series` (drift / early / late per job). `python -m village builders | verify`.
+- **Total builders come from the in-game counter.** The 7th builder is an "extra" builder: a job on it carries `extra: true`, but while it is idle nothing in the export shows it, so huts + B.O.B alone undercount (6).
+- `extra: true` on a lab job = the extra lab slot.
+- Builder's Apprentice level L: `BoostMultiplier` L for `BoostTimeSeconds` 3600, i.e. (1 + L)× speed for an hour. The rest between boosts is not in the tables; 23 h is assumed until live data confirms it.
+- The counter "x/y" is read from the same home screenshot as the resources; every capture compares it with the computed free count.
+- `village/home.py` gets the game to its home screen before each capture: System UI dialog → Wait; "Anyone there?" → RELOAD GAME; Welcome back / LDPlayer top-up ad closed; restart Clash as a last resort (unknown screens saved to `data/screens/unknown/`).
+- A file lock (`data/capture.lock`) makes sure only one process drives the game.
+- 24 h run started 2026-11-14 16:33 (hourly captures). The first attempt at 16:18 failed: "Anyone there?" then black frames during the restart. Both are now handled.
+
 ### Phase 4: Emulator lifecycle manager (moved up)
 - **Objectives:** cold start → village ready → shutdown, unattended.
 - **Tasks:**
@@ -369,6 +379,17 @@ Code: `village/` package, tests in `tests/` (`python -m unittest discover -s tes
   - Session history with screenshots;
   - Manual controls (pause, run session now, skip item).
 - **Acceptance:** every setting round-trips and survives restart; manual pause takes effect within one step.
+
+#### Built early, at your request (2026-11-14)
+`python -m village web` → `http://<PC>:8765/`. Standard library only (no packages to install).
+- **Dashboard:** resource tiles with 72 h sparklines and the change vs about a day earlier; builders free / total with live countdowns and progress bars; a 72 h builder timeline; lab, pet house and helpers; village facts; free builders over time; latest alerts.
+- **Builder queue:** catalog of everything upgradable (levels, max for TH/Hero Hall, next cost and time) and an ordered queue (drag-and-drop or arrows, target level, enable/disable).
+  - **Projected schedule** across the builders. This is a preview of the Phase 6 planner: queue order is priority, one upgrade per building or hero at a time, no resource limits yet.
+- **Settings:** all permanent settings with validation; each shows whether it is in effect now or which phase uses it.
+- **Alerts:** failed captures, counter mismatches and dashboard errors, with mark-as-read.
+- **Capture now** button (respects the capture lock), emulator status pill, dark and light themes, phone layout.
+- POSTs need the `X-Village: 1` header, so other websites can't trigger actions. There is no login (home LAN only).
+- Remaining for Phase 9: session history with screenshots, pause/skip controls wired to the orchestrator (Phase 8).
 
 ### Phase 10: Long-run hardening
 - A 7-day soak test, a failure-statistics review, and tuning of timeouts and grouping windows.

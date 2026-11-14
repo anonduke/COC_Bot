@@ -46,3 +46,30 @@ def read_value(img_bgr, name):
 
 def read_resources(img_bgr):
     return Resources(**{name: read_value(img_bgr, name) for name in REGIONS})
+
+
+# The home-village builder counter "free/total" above the Build button.
+BUILDER_COUNTER = (1415, 672, 80, 44)
+
+
+def read_builder_counter(img_bgr):
+    """(free, total) from the home-screen counter, or None if it can't be read.
+    Both are single digits, so the counter is exactly three blobs:
+    digit, slash, digit; anything else (popup, merged blobs) gives None."""
+    import numpy as np
+    x, y, w, h = BUILDER_COUNTER
+    crop = cv2.cvtColor(img_bgr[y:y + h, x:x + w], cv2.COLOR_BGR2RGB)
+    wall = _wall()
+    mask = wall._storage_mask(crop)
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
+    blobs = sorted(range(1, n), key=lambda i: stats[i, cv2.CC_STAT_LEFT])
+    if len(blobs) != 3:
+        return None
+    digits = []
+    for i in (blobs[0], blobs[2]):
+        d = wall._classify_digit_mask(np.where(labels == i, 255, 0).astype(np.uint8))
+        if len(d) != 1:
+            return None
+        digits.append(int(d))
+    free, total = digits
+    return (free, total) if 0 <= free <= total and total > 0 else None

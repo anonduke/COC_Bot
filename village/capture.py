@@ -2,8 +2,8 @@
 window may be covered.
 
 Flow (each step is checked before the next one runs):
- 1. Clash is the focused app; a "System UI isn't responding" dialog is
-    cleared first.
+ 1. Get to the home screen (village.home.ensure_home: answers System UI
+    dialogs, closes known popups, restarts Clash if needed).
  2. The user's clipboard text is saved and a sentinel is put in its place.
  3. Deep link to More Settings; wait for its title at the expected position.
  4. Drag the label column up until the "Export Village data" row is at its
@@ -21,14 +21,19 @@ Known limitation: if the user copies something while a capture waits for
 the export, that capture fails and the clipboard is restored to what it
 held before the capture started.
 """
+import msvcrt
 import os
 import time
+from contextlib import contextmanager
+from dataclasses import dataclass
 
 import cv2
 
 from . import adb, clipboard
 from .export import ExportError, parse_export
-from .resources import read_resources
+from .home import ensure_home
+from .resources import read_builder_counter, read_resources
+from .store import Resources
 
 MORE_SETTINGS_LINK = "https://link.clashofclans.com/en/?action=OpenMoreSettings"
 _MISC = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "misc")
@@ -49,6 +54,15 @@ SENTINEL = "coc-bot: waiting for village export"
 
 class CaptureError(RuntimeError):
     pass
+
+
+@dataclass
+class Capture:
+    text: str                 # the export JSON as copied
+    snapshot: object          # export.Snapshot
+    resources: Resources      # home-screen OCR
+    counter: tuple | None     # (free, total) builder counter, or None
+    home_at: float            # when the home screenshot was taken (epoch s)
 
 
 def _template(name):
@@ -103,22 +117,69 @@ def _close_dialog(title_tpl, serial):
     return bool(_wait_for(lambda img: _title(img, title_tpl) is None, 5, serial))
 
 
+LOCK_PATH = os.path.join(os.path.dirname(_MISC), "data", "capture.lock")
+
+
+@contextmanager
+def capture_lock(path=LOCK_PATH, wait=5.0):
+    """Only one process may drive the game at a time. An OS byte-range lock:
+    released automatically if the holder dies, so it never goes stale.
+    Retries for `wait` seconds (the dashboard probes the lock briefly)."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    f = open(path, "a+")
+    try:
+        end = time.time() + wait
+        while True:
+            try:
+                f.seek(0)
+                msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+                break
+            except OSError:
+                if time.time() >= end:
+                    raise CaptureError("another capture is already running") from None
+                time.sleep(0.25)
+        try:
+            yield
+        finally:
+            f.seek(0)
+            msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+    finally:
+        f.close()
+
+
+def is_capture_running(path=LOCK_PATH):
+    try:
+        with capture_lock(path, wait=0):
+            return False
+    except CaptureError:
+        return True
+
+
 def capture_export(expected_tag=None, max_age=300, serial=adb.SERIAL, log=print,
                    screen_dir=None):
-    """Run the flow once. Returns (export_text, Snapshot, Resources); the
-    resources are read from the home screen before More Settings opens
-    (fields are None if not readable, e.g. a popup was dimming the screen).
+    """Run the capture flow once while holding the capture lock; see
+    _capture_export."""
+    with capture_lock():
+        return _capture_export(expected_tag, max_age, serial, log, screen_dir)
+
+
+def _capture_export(expected_tag, max_age, serial, log, screen_dir):
+    """Run the flow once and return a Capture. Resources and the builder
+    counter are read from the home screen just before More Settings opens
+    (None where not readable, e.g. a popup was dimming the screen).
     If screen_dir is set, that screenshot is saved there for the OCR test set.
     Raises CaptureError (or adb.AdbError) with the reason on any failed check."""
     title_tpl, row_tpl = _template("more_settings_title.png"), _template("export_row.png")
 
-    if adb.dismiss_systemui_anr(serial):
-        log("dismissed a System UI ANR dialog (Wait)")
-    if not adb.wait_for_focus(adb.COC_PACKAGE, 8, serial):
-        raise CaptureError(f"Clash is not in front: {adb.focused_window(serial)}")
+    # May restart Clash if the home screen can't be reached otherwise, so
+    # don't call this while something else (an attack) is using the game.
+    if not ensure_home(serial, log):
+        raise CaptureError("could not reach the home screen")
 
+    captured_at = time.time()
     home = adb.screencap(serial)
     resources = read_resources(home)
+    counter = read_builder_counter(home)
     if screen_dir:
         os.makedirs(screen_dir, exist_ok=True)
         cv2.imwrite(os.path.join(screen_dir, time.strftime("home_%Y%m%d_%H%M%S.png")), home)
@@ -196,4 +257,4 @@ def capture_export(expected_tag=None, max_age=300, serial=adb.SERIAL, log=print,
             clipboard.set_text(saved_clip)
         except OSError as e:
             log(f"warning: could not restore the clipboard: {e}")
-    return text, snap, resources
+    return Capture(text, snap, resources, counter, captured_at)

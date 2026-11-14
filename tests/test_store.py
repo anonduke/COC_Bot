@@ -4,6 +4,7 @@ import tempfile
 import unittest
 
 from tests.helpers import export_text, load_raw
+from village import store as store_module
 from village.export import parse_export
 from village.store import Resources, Store
 
@@ -31,6 +32,39 @@ class StoreTest(unittest.TestCase):
     def test_unread_resources_are_none(self):
         got = self.store.get(self.store.save_snapshot(self.snap))
         self.assertEqual(got.resources, Resources())
+        self.assertIsNone(got.counter)
+
+    def test_counter_round_trip(self):
+        got = self.store.get(self.store.save_snapshot(self.snap, counter=(1, 7)))
+        self.assertEqual(got.counter, (1, 7))
+
+    def test_all_oldest_first(self):
+        for dt in (600, 0):
+            raw = copy.deepcopy(self.raw)
+            raw["timestamp"] += dt
+            self.store.save_snapshot(parse_export(export_text(raw)))
+        ts = [s.snapshot.timestamp for s in self.store.all()]
+        self.assertEqual(ts, sorted(ts))
+        self.assertEqual(len(self.store.all(since=ts[1])), 1)
+
+    def test_upgrade_from_v1(self):
+        # A database created before the counter columns existed.
+        import sqlite3
+        from village import store as store_mod
+        path = os.path.join(self.tmp.name, "v1.db")
+        db = sqlite3.connect(path)
+        db.executescript(store_mod._MIGRATIONS[0] + "PRAGMA user_version = 1;")
+        db.execute("INSERT INTO snapshots (tag, export_ts, captured_at, raw_json) VALUES (?,?,?,?)",
+                   (self.snap.tag, self.snap.timestamp, 1, export_text(self.raw)))
+        db.commit()
+        db.close()
+        s = Store(path)
+        try:
+            self.assertEqual(s.db.execute("PRAGMA user_version").fetchone()[0],
+                             len(store_mod._MIGRATIONS))
+            self.assertIsNone(s.latest().counter)
+        finally:
+            s.close()
 
     def test_same_export_saved_once(self):
         a = self.store.save_snapshot(self.snap)
@@ -54,7 +88,8 @@ class StoreTest(unittest.TestCase):
         self.store.close()
         self.store = Store(self.path)
         self.assertEqual(self.store.count(), 1)
-        self.assertEqual(self.store.db.execute("PRAGMA user_version").fetchone()[0], 1)
+        self.assertEqual(self.store.db.execute("PRAGMA user_version").fetchone()[0],
+                         len(store_module._MIGRATIONS))
         self.assertEqual(self.store.db.execute("PRAGMA journal_mode").fetchone()[0], "wal")
 
 
