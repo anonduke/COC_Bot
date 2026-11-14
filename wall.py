@@ -1,4 +1,7 @@
 # wall_upgrade_simulation_test.py
+import os
+import sys
+import socket
 import time
 import threading
 import traceback
@@ -9,6 +12,11 @@ import numpy as np
 import pygetwindow as gw
 
 pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+
+# Debug prints use "→", "✅" etc. — on a cp1252 console/pipe those raise
+# UnicodeEncodeError and kill the whole flow, so degrade to "?" instead.
+if sys.stdout is not None and hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(errors="replace")
 
 # -------------------------------------------
 #  CONFIG
@@ -45,6 +53,48 @@ FULL_MATCH_THRESHOLD = 0.1
 LIST_SCROLL_AMOUNT = -600
 MAX_SCROLL_TRIES   = 15
 
+# "otsu" = dark/light list rows (centered popup list);
+# "white" = white text on brown rows (right-side "Buildings & Heroes" panel)
+LIST_TEXT_MODE = "otsu"
+
+# Walls upgrade instantly but Confirm still needs a free builder (otherwise
+# the gem-priced Goblin Builder offer pops up), so check the counter first.
+REQUIRE_FREE_BUILDER = True
+
+# Right-side builder panel (newer UI only). None = not used on this machine.
+BUILDER_PANEL_TITLE_AREA = None   # "Buildings & Heroes" title text
+BUILDER_PANEL_CLOSE      = None   # red X button (x, y)
+
+# On the newer UI, tapping the Wall row selects a wall and shows Upgrade
+# buttons (gold / elixir / wall rings) instead of opening the dialog
+# directly. This hammer icon finds the gold/elixir ones wherever they are.
+UPGRADE_HAMMER_REF = "misc/wall_upgrade_hammer.png"
+
+# ---------------------------------------------------------
+#  PER-MACHINE OVERRIDES (keyed by hostname)
+# ---------------------------------------------------------
+# Each PC's LDPlayer renders the HUD differently (different resource-bar
+# spacing, builder counter position, builder list layout), so the offsets
+# above only fit the machine they were measured on. Machines not listed
+# here use the defaults above unchanged.
+MACHINE_PROFILES = {
+    # 1366x768 display, LDPlayer window 1236x708 at (84, 10), newer CoC UI.
+    # All values measured live on 2026-11-12.
+    "DESKTOP-GSD3MHF": {
+        "GOLD_OFFSET":   (1000,  58, 142, 26),
+        "ELIXIR_OFFSET": (1000, 103, 142, 26),
+        "BUILDER_AREA":  (1060, 538,  56, 26),   # "0/7" next to the Build button
+        "LIST_AREA":     ( 880,  85, 315, 545),  # right-side builder panel
+        "LIST_TEXT_MODE": "white",
+        "LIST_SCROLL_AMOUNT": -300,  # -600 skipped past rows
+        "MAX_SCROLL_TRIES":   25,
+        "REQUIRE_FREE_BUILDER": True,   # Confirm needs a free builder (live: "all your Builders are busy")
+        "BUILDER_PANEL_TITLE_AREA": (950, 40, 180, 30),
+        "BUILDER_PANEL_CLOSE":      (1176, 55),
+    },
+}
+MACHINE_NAME = socket.gethostname().upper()
+
 # Global window position (set by activate_game_window)
 WINDOW_X, WINDOW_Y = 0, 0
 
@@ -52,6 +102,34 @@ WINDOW_X, WINDOW_Y = 0, 0
 # ---------------------------------------------------------
 #  ACTIVATE LDPLAYER  (mirrors Ranked_Copy.py pattern)
 # ---------------------------------------------------------
+def force_foreground(win, tries=3):
+    """Bring `win` to the front and confirm it is really the foreground
+    window. Windows refuses SetForegroundWindow while another app holds focus
+    (pygetwindow then raises 'Error code 0 - The operation completed
+    successfully'); live, the bot then searched/clicked over VS Code for
+    minutes. Minimize + restore gets past that lock."""
+    for _ in range(tries):
+        try:
+            if win.isMinimized:
+                win.restore()
+            win.activate()
+        except Exception:
+            pass
+        time.sleep(0.15)
+        active = gw.getActiveWindow()
+        if active is not None and active._hWnd == win._hWnd:
+            return True
+        try:
+            win.minimize()
+            time.sleep(0.3)
+            win.restore()
+            time.sleep(0.5)
+        except Exception:
+            pass
+    active = gw.getActiveWindow()
+    return active is not None and active._hWnd == win._hWnd
+
+
 def activate_game_window():
     global WINDOW_X, WINDOW_Y
     try:
@@ -61,8 +139,9 @@ def activate_game_window():
             return False
 
         game_window = windows[0]
-        game_window.activate()
-        game_window.restore()
+        if not force_foreground(game_window):
+            print("❌ LDPlayer could not be brought to the front")
+            return False
         WINDOW_X, WINDOW_Y = game_window.left, game_window.top
         print(f"[INFO] LDPlayer activated at ({WINDOW_X}, {WINDOW_Y})")
         return True
@@ -153,16 +232,41 @@ def parse_coc_number(raw):
 # ---------------------------------------------------------
 #  OCR FUNCTION (gold/elixir)
 # ---------------------------------------------------------
-def read_storage(offset, label="resource", debug_name="debug.png"):
-    region = get_absolute_region(offset)
-    if not region:
-        return 0
+# Sample digits of the game font (same file Ranked_Copy uses for loot).
+# Tesseract occasionally doubles or drops a digit on clean storage masks
+# ('649 545' -> 6495545 live), so digits are matched one by one instead.
+try:
+    _DIGITS = np.load(os.path.join(os.path.dirname(os.path.abspath(__file__)), "misc", "loot_digits.npz"))
+    _DIGIT_SAMPLES = [(d, img) for d in _DIGITS.files for img in _DIGITS[d].astype(np.float32) / 255]
+except Exception:
+    _DIGIT_SAMPLES = []
 
-    # screenshot
-    img_pil = pyautogui.screenshot(region=region)
-    img_pil.save(debug_name)
 
-    img_rgb = np.array(img_pil)
+def _classify_digit_mask(mask):
+    """Read a white-on-black digit mask by matching each digit blob against
+    the samples. Two touching digits form one wide blob and are split.
+    Returns '' if there are no samples or no blobs."""
+    if not _DIGIT_SAMPLES:
+        return ""
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
+    out = ""
+    for i in sorted(range(1, n), key=lambda i: stats[i, cv2.CC_STAT_LEFT]):
+        x, y, w, h = stats[i, :4]
+        blob = (labels[y:y + h, x:x + w] == i).astype(np.float32)
+        parts = max(1, round(w / (0.82 * h))) if w > h * 1.3 else 1
+        for p in range(parts):
+            piece = cv2.resize(blob[:, p * w // parts:(p + 1) * w // parts], (20, 30),
+                               interpolation=cv2.INTER_AREA)
+            dist, digit = min((np.abs(s - piece).sum(), d) for d, s in _DIGIT_SAMPLES)
+            # Real digits match within ~30; bright scenery behind the bar
+            # leaves blobs at ~170 that would otherwise add a leading digit.
+            if dist <= 80:
+                out += digit
+    return out
+
+
+def _storage_mask(img_rgb):
+    """White digit mask of a gold/elixir storage crop (4x upscaled)."""
     img_up  = cv2.resize(img_rgb, None, fx=4, fy=4, interpolation=cv2.INTER_CUBIC)
 
     # Extract white text using HSV:
@@ -177,17 +281,50 @@ def read_storage(offset, label="resource", debug_name="debug.png"):
         cv2.threshold(v, 180, 255, cv2.THRESH_BINARY)[1],      # bright
         cv2.threshold(s,  40, 255, cv2.THRESH_BINARY_INV)[1],  # not coloured
     )
+    # Drop blobs much shorter than a digit — the bar's animated sparkle leaves
+    # specks that intermittently OCR as a leading extra digit (7518938 → 77518938).
+    # The number is right-aligned, so also keep only the rightmost cluster of
+    # blobs (digit-group spaces are far narrower than a digit's height).
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(white_mask, 8)
+    if n > 1:
+        max_h = stats[1:, cv2.CC_STAT_HEIGHT].max()
+        keep = [i for i in range(1, n) if stats[i, cv2.CC_STAT_HEIGHT] >= max_h * 0.6]
+        keep.sort(key=lambda i: stats[i, cv2.CC_STAT_LEFT], reverse=True)
+        cluster = keep[:1]
+        for i in keep[1:]:
+            prev = cluster[-1]
+            gap = stats[prev, cv2.CC_STAT_LEFT] - (stats[i, cv2.CC_STAT_LEFT] + stats[i, cv2.CC_STAT_WIDTH])
+            if gap > max_h:
+                break
+            cluster.append(i)
+        white_mask = np.where(np.isin(labels, cluster), 255, 0).astype(np.uint8)
+    return white_mask
+
+
+def read_storage(offset, label="resource", debug_name="debug.png"):
+    region = get_absolute_region(offset)
+    if not region:
+        return 0
+
+    # screenshot
+    img_pil = pyautogui.screenshot(region=region)
+    img_pil.save(debug_name)
+
+    white_mask = _storage_mask(np.array(img_pil))
     img_inv = cv2.bitwise_not(white_mask)   # Tesseract needs black-on-white
 
     debug_pre = debug_name.replace(".png", "_pre.png")
     cv2.imwrite(debug_pre, img_inv)
 
-    raw = pytesseract.image_to_string(
-        img_inv,
-        config="--oem 3 --psm 7 -c tessedit_char_whitelist=0123456789 "
-    )
-
-    result = parse_coc_number(raw)
+    raw = _classify_digit_mask(white_mask)
+    if raw:
+        result = int(raw[-8:])   # max storage is 8 digits
+    else:
+        raw = pytesseract.image_to_string(
+            img_inv,
+            config="--oem 3 --psm 7 -c tessedit_char_whitelist=0123456789 "
+        )
+        result = parse_coc_number(raw)
 
     if DEBUG:
         print(f"[DEBUG] {label}: region     = {region}")
@@ -382,6 +519,17 @@ def read_builder_count():
 # ---------------------------------------------------------
 def _preprocess_list_image(img_arr):
     """Preprocess the list screenshot for Tesseract word detection."""
+    if LIST_TEXT_MODE == "white":
+        # White row titles on brown rows — OTSU can't separate those, so keep
+        # only bright, unsaturated pixels (same idea as read_storage).
+        up = cv2.resize(img_arr, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
+        _, s, v = cv2.split(cv2.cvtColor(up, cv2.COLOR_RGB2HSV))
+        white_mask = cv2.bitwise_and(
+            cv2.threshold(v, 190, 255, cv2.THRESH_BINARY)[1],
+            cv2.threshold(s,  60, 255, cv2.THRESH_BINARY_INV)[1],
+        )
+        return cv2.bitwise_not(white_mask), 3
+
     gray = cv2.cvtColor(img_arr, cv2.COLOR_RGB2GRAY)
     up   = cv2.resize(gray, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
     # OTSU works well for list text (mixed dark/light rows)
@@ -466,26 +614,49 @@ def find_and_click_wall():
     print("=" * 55)
 
     # ── Step 1: builder count ──────────────────────────────────
-    print("\n[STEP 1] Checking builder availability...")
-    free, total = read_builder_count()
+    if REQUIRE_FREE_BUILDER:
+        print("\n[STEP 1] Checking builder availability...")
+        free, total = read_builder_count()
 
-    if free == 0 and total == 0:
-        print("[STEP 1] FAIL: Could not read builder count.")
-        return "BUILDER_OCR_FAILED"
+        if free == 0 and total == 0:
+            print("[STEP 1] FAIL: Could not read builder count.")
+            return "BUILDER_OCR_FAILED"
 
-    if free == 0:
-        print(f"[STEP 1] FAIL: No free builders ({free}/{total}).")
-        return "NO_FREE_BUILDER"
+        if free == 0:
+            print(f"[STEP 1] FAIL: No free builders ({free}/{total}).")
+            return "NO_FREE_BUILDER"
 
-    print(f"[STEP 1] OK — {free}/{total} builder(s) free.")
+        print(f"[STEP 1] OK — {free}/{total} builder(s) free.")
+    else:
+        print("\n[STEP 1] Skipped — walls don't need a free builder on this machine's UI.")
 
     # ── Step 2: open builder list ──────────────────────────────
-    print("\n[STEP 2] Clicking builder button to open upgrade list...")
-    btn_cx = WINDOW_X + BUILDER_AREA[0] + BUILDER_AREA[2] // 2
-    btn_cy = WINDOW_Y + BUILDER_AREA[1] + BUILDER_AREA[3] // 2
-    print(f"  Click at screen ({btn_cx}, {btn_cy})")
-    pyautogui.click(btn_cx, btn_cy)
-    time.sleep(1.5)
+    # The side panel stays open after an upgrade; tapping the builder
+    # counter again would land on a random list row instead.
+    panel_was_open = builder_panel_open()
+    if panel_was_open:
+        print("\n[STEP 2] Builder list already open.")
+    else:
+        print("\n[STEP 2] Clicking builder button to open upgrade list...")
+        btn_cx = WINDOW_X + BUILDER_AREA[0] + BUILDER_AREA[2] // 2
+        btn_cy = WINDOW_Y + BUILDER_AREA[1] + BUILDER_AREA[3] // 2
+        print(f"  Click at screen ({btn_cx}, {btn_cy})")
+        pyautogui.click(btn_cx, btn_cy)
+        time.sleep(1.5)
+        # Live: one tap right after returning from a battle didn't open the
+        # panel, and the 25 scans of the home screen then reported
+        # WALL_NOT_FOUND (which reads as "all walls maxed"). Verify and retry.
+        if BUILDER_PANEL_TITLE_AREA:
+            for _ in range(2):
+                if builder_panel_open():
+                    break
+                print("  Builder panel didn't open — tapping again")
+                pyautogui.click(btn_cx, btn_cy)
+                time.sleep(2)
+            else:
+                if not builder_panel_open():
+                    print("[STEP 2] FAIL — builder panel would not open.")
+                    return "PANEL_NOT_OPEN"
 
     # ── Step 3: scan + scroll ──────────────────────────────────
     list_abs = (
@@ -500,6 +671,14 @@ def find_and_click_wall():
     print(f"         Scroll point  (abs): ({scroll_x}, {scroll_y})")
 
     pyautogui.moveTo(scroll_x, scroll_y)
+
+    if panel_was_open:
+        # Left scrolled from a previous run — start again from the top so the
+        # downward scan can't begin below the Wall row.
+        for _ in range(15):
+            pyautogui.scroll(1000)
+            time.sleep(0.1)
+        time.sleep(0.8)
 
     for attempt in range(1, MAX_SCROLL_TRIES + 1):
         print(f"\n[STEP 3] Scanning list (attempt {attempt}/{MAX_SCROLL_TRIES})...")
@@ -587,11 +766,107 @@ def _need_more_currency_popup_open():
     text = _ocr_region_text(NEED_MORE_POPUP_AREA)
     return "need" in text and ("more" in text or "elixir" in text or "gold" in text)
 
+def _click_close_btn():
+    """Click the topmost red X (Close_Btn.PNG). Returns False if none is on
+    screen — pyscreeze raises rather than returning None when it's missing."""
+    try:
+        pos = pyautogui.locateCenterOnScreen("Close_Btn.PNG", confidence=0.7)
+    except Exception:
+        pos = None
+    if not pos:
+        return False
+    pyautogui.click(pos)
+    time.sleep(0.8)
+    return True
+
+BUILDERS_BUSY_POPUP_AREA  = (560, 160, 560, 180)  # "Hey Chief! ... all your Builders are busy"
+BUILDERS_BUSY_POPUP_CLOSE = (1069, 178)           # that popup's red X (live-verified)
+
+def _builders_busy_popup_open():
+    """True if Confirm brought up 'Hey Chief! Looks like all your Builders are
+    busy' — the offer to finish with the gem-paid Goblin Builder. Walls DO
+    need a free builder at Confirm, and the builder counter can count the
+    Goblin Builder as free ('1/7'). Live: this popup hid the dialog title, so
+    it was read as a successful upgrade and the loop repeated. Back out with
+    the red X only — never the gem buttons."""
+    text = _ocr_region_text(BUILDERS_BUSY_POPUP_AREA)
+    return "busy" in text or "chief" in text or "goblin" in text
+
 def _main_upgrade_dialog_open():
     """True if the 'Upgrade Wall to Level N?' confirmation dialog is still
     showing (title bar still visible)."""
     text = _ocr_region_text(MAIN_DIALOG_TITLE_AREA)
     return "upgrade" in text or "level" in text
+
+def builder_panel_open():
+    """True if the right-side 'Buildings & Heroes' panel is showing. Always
+    False on machines whose profile doesn't define the panel."""
+    if not BUILDER_PANEL_TITLE_AREA:
+        return False
+    text = _ocr_region_text(BUILDER_PANEL_TITLE_AREA)
+    return "building" in text or "heroes" in text
+
+def close_builder_panel():
+    """Close the right-side builder panel if it's open (no-op otherwise)."""
+    if not BUILDER_PANEL_CLOSE or not activate_game_window():
+        return
+    if builder_panel_open():
+        pyautogui.click(WINDOW_X + BUILDER_PANEL_CLOSE[0], WINDOW_Y + BUILDER_PANEL_CLOSE[1])
+        time.sleep(1)
+        print("[PANEL] Builder panel closed")
+
+def _find_upgrade_buttons():
+    """Locate the hammer Upgrade buttons shown under a selected wall and tell
+    gold from elixir by the colour of the price icon at each button's top
+    right (yellow coin vs pink drop). Their position shifts depending on
+    whether the side panel is open, so fixed coordinates don't work.
+    Returns {"gold": (x, y), "elixir": (x, y)} in screen coords (either key
+    may be missing)."""
+    tpl = cv2.imread(UPGRADE_HAMMER_REF)
+    if tpl is None:
+        print(f"[UPGRADE] Hammer reference '{UPGRADE_HAMMER_REF}' missing")
+        return {}
+    shot = cv2.cvtColor(np.array(pyautogui.screenshot(
+        region=(WINDOW_X, WINDOW_Y, 1236, 708))), cv2.COLOR_RGB2BGR)
+    res = cv2.matchTemplate(shot, tpl, cv2.TM_CCOEFF_NORMED)
+    th, tw = tpl.shape[:2]
+
+    centers = []
+    ys, xs = np.where(res >= 0.7)
+    for x, y in sorted(zip(xs, ys), key=lambda p: -res[p[1], p[0]]):
+        cx, cy = int(x) + tw // 2, int(y) + th // 2
+        if all(abs(cx - ex) > 20 or abs(cy - ey) > 20 for ex, ey in centers):
+            centers.append((cx, cy))
+
+    buttons = {}
+    for cx, cy in centers[:3]:
+        icon = shot[max(0, cy - 46):cy - 28, cx + 36:cx + 58]
+        if icon.size == 0:
+            continue
+        h, s, v = cv2.split(cv2.cvtColor(icon, cv2.COLOR_BGR2HSV))
+        gold_px   = int(((h >= 15) & (h <= 35) & (s > 120) & (v > 150)).sum())
+        elixir_px = int(((h >= 135) & (h <= 170) & (s > 80) & (v > 100)).sum())
+        kind = "gold" if gold_px > elixir_px else "elixir"
+        if max(gold_px, elixir_px) >= 30 and kind not in buttons:
+            buttons[kind] = (WINDOW_X + cx, WINDOW_Y + cy)
+        if DEBUG:
+            print(f"[UPGRADE] hammer at ({cx},{cy}) gold_px={gold_px} elixir_px={elixir_px} -> {kind}")
+    return buttons
+
+def _open_upgrade_dialog(gold):
+    """Newer UI: the Wall row only selects a wall, so tap its gold (or
+    elixir) Upgrade button to bring up the 'Upgrade Wall to Level N?' dialog.
+    Returns True if a button was tapped."""
+    buttons = _find_upgrade_buttons()
+    currency = "gold" if gold >= WALL_PRICE else "elixir"
+    pos = buttons.get(currency)
+    if not pos:
+        print(f"[UPGRADE] {currency} Upgrade button not found (found: {list(buttons)})")
+        return False
+    print(f"[UPGRADE] Tapping {currency} Upgrade button at {pos}")
+    pyautogui.click(pos)
+    time.sleep(2.0)
+    return True
 
 def click_upgrade_button(gold, elixir, max_attempts=4):
     """
@@ -631,6 +906,18 @@ def click_upgrade_button(gold, elixir, max_attempts=4):
     confirm_cx = WINDOW_X + CONFIRM_BTN[0] + CONFIRM_BTN[2] // 2
     confirm_cy = WINDOW_Y + CONFIRM_BTN[1] + CONFIRM_BTN[3] // 2
 
+    # Newer UI: the dialog isn't open yet, only the wall's Upgrade buttons.
+    # Confirm must never be clicked blind there — that spot is the magic
+    # items button when no dialog covers it.
+    if not _main_upgrade_dialog_open():
+        if _open_upgrade_dialog(gold):
+            if not _main_upgrade_dialog_open():
+                print("[UPGRADE] Upgrade dialog did not open — aborting.")
+                return "UPGRADE_CLICK_FAILED"
+        elif BUILDER_PANEL_TITLE_AREA:
+            # Newer-UI machine and no Upgrade buttons — never click blind.
+            return "UPGRADE_CLICK_FAILED"
+
     dialog_closed = False
     for attempt in range(1, max_attempts + 1):
         print(f"[UPGRADE] Attempt {attempt}/{max_attempts}: clicking Confirm at ({confirm_cx}, {confirm_cy})")
@@ -644,12 +931,20 @@ def click_upgrade_button(gold, elixir, max_attempts=4):
             # main dialog behind it), using image search rather than a fixed
             # coordinate so it works regardless of the popup's exact size.
             for _ in range(2):
-                pos = pyautogui.locateCenterOnScreen("Close_Btn.PNG", confidence=0.7)
-                if not pos:
+                if not _click_close_btn():
                     break
-                pyautogui.click(pos)
-                time.sleep(0.8)
             return "NOT_ENOUGH_RESOURCES"
+
+        if _builders_busy_popup_open():
+            print("[UPGRADE] All builders busy (Goblin Builder gem offer) — "
+                  "backing out without spending gems")
+            # The offer's own X is larger than Close_Btn.PNG and doesn't
+            # match it, so tap it at its fixed spot, then close the dialog.
+            pyautogui.click(WINDOW_X + BUILDERS_BUSY_POPUP_CLOSE[0],
+                            WINDOW_Y + BUILDERS_BUSY_POPUP_CLOSE[1])
+            time.sleep(1.0)
+            _click_close_btn()
+            return "NO_FREE_BUILDER"
 
         if not _main_upgrade_dialog_open():
             print("[UPGRADE] Dialog closed — Confirm registered")
@@ -666,6 +961,7 @@ def click_upgrade_button(gold, elixir, max_attempts=4):
     # read it once more purely to label which currency got spent. This is
     # best-effort only: if OCR still can't get a clean read, the upgrade
     # already succeeded regardless (per the dialog-closed check above).
+    close_builder_panel()   # panel shifts the resource bars out of their offsets
     gold_after, elixir_after = _read_resources_after_upgrade()
     print(f"[UPGRADE] Gold before={gold:,} after={gold_after:,} | "
           f"Elixir before={elixir:,} after={elixir_after:,}")
@@ -674,6 +970,13 @@ def click_upgrade_button(gold, elixir, max_attempts=4):
         return "UPGRADED_WITH_GOLD"
     if elixir_after and elixir_after <= elixir - (WALL_PRICE // 2):
         return "UPGRADED_WITH_ELIXIR"
+
+    if gold_after and elixir_after:
+        # Both balances read cleanly and neither dropped — the dialog closed
+        # for some other reason (e.g. a different popup took over). Treating
+        # that as success would loop forever re-"upgrading".
+        print("[UPGRADE] Dialog closed but no resources were spent — treating as failed")
+        return "UPGRADE_NOT_CONFIRMED"
 
     print("[UPGRADE] Upgrade succeeded (dialog closed) but currency used couldn't be determined")
     return "UPGRADED"
@@ -727,6 +1030,9 @@ def upgrade_wall():
     # Retried — a single flaky OCR read (elixir especially) coming back 0
     # here would poison success-detection for the rest of this attempt.
     print("\n[STEP 1] Reading resources...")
+    # The side panel (left open by a previous upgrade) shifts the resource
+    # bars left, out of GOLD_OFFSET/ELIXIR_OFFSET.
+    close_builder_panel()
     gold   = read_storage_retry(GOLD_OFFSET,   label="GOLD",   debug_name="debug_gold.png")
     elixir = read_storage_retry(ELIXIR_OFFSET, label="ELIXIR", debug_name="debug_elixir.png")
 
@@ -819,7 +1125,15 @@ def simulate_wall_upgrade():
 
 
 # ---------------------------------------------------------
+#  APPLY PER-MACHINE PROFILE (after every default above is defined)
+# ---------------------------------------------------------
+globals().update(MACHINE_PROFILES.get(MACHINE_NAME, {}))
+
+
+# ---------------------------------------------------------
 if __name__ == "__main__":
+    print(f"[INFO] Machine '{MACHINE_NAME}' — "
+          f"{'custom profile' if MACHINE_NAME in MACHINE_PROFILES else 'default offsets'}")
     if not activate_game_window():
         raise SystemExit("LDPlayer not found")
 

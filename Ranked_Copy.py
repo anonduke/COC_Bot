@@ -44,7 +44,7 @@ CONFIG = {
     'min_gold_to_attack': 0,
     'max_attack_attempts': 20,
     'battle_wait_timeout': 30,
-    'gold_region': (60, 125, 125, 25),  # Relative to WINDOW_X, WINDOW_Y
+    'gold_region': (60, 116, 125, 34),  # Relative to WINDOW_X, WINDOW_Y — was (60,125,125,25), which cut the digit tops ('883 485' -> '634')
     'retry_attempts': 3,
     'retry_delay': 2,
     'ranked_mode': False,       # Toggle for ranked battle mode
@@ -104,6 +104,7 @@ king_position = (347, 489)
 duke_position = (347, 489)
 prince_position = (395, 223)
 rc_position = (640, 62)
+rc_fallback_position = (413, 210)   # electro/balloon lane — used when rc_position isn't a legal drop on this base
 cc_position = (207, 353)
 baby_dragon_position = (395, 223)
 b_hero_position = (395, 223)  # Builder Base hero deploy point
@@ -116,6 +117,33 @@ rage_spell_positions = [
 freeze_spell_positions = [
     (595, 409), (687, 341), (760, 273)
 ]
+
+def _force_foreground(win, tries=3):
+    """Bring `win` to the front and confirm it really is the foreground
+    window. Windows refuses SetForegroundWindow while another app holds focus
+    (pygetwindow raises 'Error code 0 - The operation completed
+    successfully'); live, the bot then searched/clicked over VS Code for
+    minutes. Minimize + restore gets past that lock."""
+    for _ in range(tries):
+        try:
+            if win.isMinimized:
+                win.restore()
+            win.activate()
+        except Exception:
+            pass
+        time.sleep(0.15)
+        active = gw.getActiveWindow()
+        if active is not None and active._hWnd == win._hWnd:
+            return True
+        try:
+            win.minimize()
+            time.sleep(0.3)
+            win.restore()
+            time.sleep(0.5)
+        except Exception:
+            pass
+    active = gw.getActiveWindow()
+    return active is not None and active._hWnd == win._hWnd
 
 def activate_game_window():
     """Bring LDPlayer window to the foreground."""
@@ -134,8 +162,9 @@ def activate_game_window():
             return False
 
         game_window = windows[0]
-        game_window.activate()
-        game_window.restore()
+        if not _force_foreground(game_window):
+            logging.error("LDPlayer could not be brought to the front")
+            return False
         WINDOW_X, WINDOW_Y = game_window.left, game_window.top
         logging.info(f"LDPlayer activated at ({WINDOW_X}, {WINDOW_Y})")
 
@@ -157,8 +186,11 @@ def locate_image(image_path, confidence=0.8, retries=CONFIG['retry_attempts']):
                 logging.info(f"Found '{image_path}' at {pos} (Attempt {attempt + 1})")
                 return pos
             time.sleep(CONFIG['retry_delay'])
+        except pyautogui.ImageNotFoundException:
+            pass   # pyscreeze raises instead of returning None — just "not on screen"
         except Exception as e:
             logging.error(f"Error locating '{image_path}': {traceback.format_exc()}")
+    logging.debug(f"'{image_path}' not found")
     return None
 
 def zoomOutAndCenter():
@@ -182,6 +214,73 @@ def zoomOutAndCenter():
 
     logging.info("Base centered")
     return True
+def _loot_digit_mask(crop_bgr):
+    """Black-on-white image of just the cream-coloured loot digits.
+    A plain grey threshold reads nothing over a busy battlefield, and a
+    bright/unsaturated mask alone also picks up snow on winter bases
+    ('698 714' -> '69871499'). So: drop bluish pixels, then keep only
+    digit-sized blobs that sit on the same row and don't touch the crop edge
+    (live-verified on 3 bases: 1184638, 883485, 698714).
+    Also returns each digit, left to right, as a 30x20 0/1 image for
+    _classify_loot_digits. Two touching digits ('99') form one wide blob,
+    which is split evenly."""
+    up = cv2.resize(crop_bgr, None, fx=4, fy=4, interpolation=cv2.INTER_CUBIC)
+    h, s, v = cv2.split(cv2.cvtColor(up, cv2.COLOR_BGR2HSV))
+    mask = ((v > 170) & (s < 90) & ~((h >= 80) & (h <= 140) & (s > 20))).astype(np.uint8) * 255
+
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
+    img_h = mask.shape[0]
+    digits = [i for i in range(1, n)
+              if 35 <= stats[i][3] <= 80                    # digit height at 4x
+              and stats[i][2] <= stats[i][3] * 3.5          # up to ~3 touching digits
+              and stats[i][4] >= 150
+              and stats[i][1] > 2 and stats[i][1] + stats[i][3] < img_h - 2]
+    keep = np.zeros_like(mask)
+    digit_imgs = []
+    if digits:
+        row_mid = np.median([stats[i][1] + stats[i][3] / 2 for i in digits])
+        for i in sorted(digits, key=lambda i: stats[i][0]):
+            x, y, w, bh = stats[i][:4]
+            if abs(y + bh / 2 - row_mid) > 12:
+                continue
+            keep[labels == i] = 255
+            blob = (labels[y:y + bh, x:x + w] == i).astype(np.float32)
+            parts = max(1, round(w / (0.82 * bh))) if w > bh * 1.3 else 1
+            for p in range(parts):
+                piece = blob[:, p * w // parts:(p + 1) * w // parts]
+                digit_imgs.append(cv2.resize(piece, (20, 30), interpolation=cv2.INTER_AREA))
+    return cv2.copyMakeBorder(cv2.bitwise_not(keep), 20, 20, 20, 20,
+                              cv2.BORDER_CONSTANT, value=255), digit_imgs
+
+# Sample digits cut from live loot reads (built from ~100 bases). Tesseract
+# misreads this font too often — drops 1s ('711 761' -> 71761) and turns 9
+# into 5/3 — while nearest-sample matching had 0 errors on 500 digits.
+try:
+    _LOOT_DIGITS = np.load(os.path.join(os.path.dirname(os.path.abspath(__file__)), "misc", "loot_digits.npz"))
+    _LOOT_DIGIT_SAMPLES = [(d, img) for d in _LOOT_DIGITS.files for img in _LOOT_DIGITS[d].astype(np.float32) / 255]
+except Exception:
+    _LOOT_DIGIT_SAMPLES = []
+
+def _classify_loot_digits(digit_imgs):
+    return ''.join(min(_LOOT_DIGIT_SAMPLES, key=lambda s: np.abs(s[1] - im).sum())[0]
+                   for im in digit_imgs)
+
+def _ocr_loot_mask(mask, digit_imgs):
+    """Read the loot number: per-digit sample matching when the samples file
+    is present, else Tesseract, preferring a read with one digit per blob
+    (at full 4x size it sometimes drops a '0': '2 013 889' -> 213889)."""
+    if _LOOT_DIGIT_SAMPLES and digit_imgs:
+        return _classify_loot_digits(digit_imgs)
+    first = ''
+    for scale, psm in ((0.5, 7), (1.0, 7), (0.35, 7), (0.5, 8)):
+        img = cv2.resize(mask, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA) if scale != 1.0 else mask
+        text = ''.join(filter(str.isdigit, pytesseract.image_to_string(
+            img, config=f'--oem 3 --psm {psm} -c tessedit_char_whitelist=0123456789')))
+        if text and len(text) == len(digit_imgs):
+            return text
+        first = first or text
+    return first
+
 def recognize_numbers_from_region(region):
     """Capture a screenshot of the specified region and recognize numbers using pytesseract."""
     try:
@@ -197,26 +296,26 @@ def recognize_numbers_from_region(region):
         
         # Read the image with OpenCV
         image = cv2.imread(filename)
-        gray_image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        
-        # Apply thresholding
-        _, threshold_img = cv2.threshold(gray_image, 150, 255, cv2.THRESH_BINARY)
-        
-        # OCR with pytesseract (digits only)
-        custom_config = r'--oem 3 --psm 6 -c tessedit_char_whitelist=0123456789'
-        recognized_text = pytesseract.image_to_string(threshold_img, config=custom_config)
-        
-        # Clean and convert to integer
-        numbers = ''.join(filter(str.isdigit, recognized_text))
+        numbers = _ocr_loot_mask(*_loot_digit_mask(image))
+
+        if not numbers:
+            # Fallback: the original grey threshold
+            gray_image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            _, threshold_img = cv2.threshold(gray_image, 150, 255, cv2.THRESH_BINARY)
+            recognized_text = pytesseract.image_to_string(
+                threshold_img, config=r'--oem 3 --psm 6 -c tessedit_char_whitelist=0123456789')
+            numbers = ''.join(filter(str.isdigit, recognized_text))
+
         gold = int(numbers) if numbers else 0
-        
         logging.debug(f"Recognized gold amount: {gold}")
-        
-        # Stop the program if gold is zero
+
+        # A 0 read is left to the caller: it fails the min-gold check (so
+        # attack() skips to the next base) unless min gold is 0. Skipping here
+        # as well used to throw away every base once and attack the next one
+        # unchecked.
         if gold == 0:
-            logging.error("Gold amount is zero. next Openent.")
-            nextOpponent()
-        
+            logging.warning("Gold OCR read 0")
+
         return gold
     except Exception as e:
         logging.error(f"Error in recognize_numbers_from_region: {traceback.format_exc()}")
@@ -231,8 +330,17 @@ def isGoodOpponent():
     # Visualize gold region (commented out as per your code)
     # draw_green_square(gold_region[0], gold_region[1], gold_region[2], gold_region[3], duration=1)
     
-    # Fetch gold amount using OCR
+    # Fetch gold amount using OCR. Right after the battle opens the loot
+    # numbers can still be settling (read 54786 for 447059 live), so keep
+    # reading until two consecutive reads agree.
     gold = recognize_numbers_from_region(gold_region)
+    for _ in range(4):
+        time.sleep(0.7)
+        again = recognize_numbers_from_region(gold_region)
+        if again == gold:
+            break
+        logging.info(f"Gold read changed {gold} -> {again}, reading again")
+        gold = again
     logging.info(f"Detected gold: {gold}")
     
     # Check if gold meets the minimum requirement
@@ -245,11 +353,36 @@ def updateTimestamp(timer: str):
     if timer in timestamps:
         timestamps[timer] = datetime.now()
 
-def finishBattleAndGoHome():
-    """End battle and return to village."""
+def endBattle():
+    """End the battle if it is still running. Once troops are deployed the
+    red button reads 'Surrender' instead of 'End Battle' — looking only for
+    End Battle left the bot waiting out the full 3-minute timer. Neither
+    button is shown when the battle already ended on its own, so never click None."""
+    for btn_img, ok_img in (("misc/battle_screen.png", "misc/end_ok.png"),
+                            ("misc/surrender.PNG", "misc/surrender_ok.PNG")):
+        btn = locate_image(btn_img, retries=1)
+        if btn:
+            pyautogui.click(btn)
+            time.sleep(1.5)
+            ok_btn = locate_image(ok_img)
+            if ok_btn:
+                pyautogui.click(ok_btn)
+            logging.info(f"Battle ended early via {btn_img}")
+            return
+    logging.info("No End Battle/Surrender button — battle already over")
+
+
+def finishBattleAndGoHome(timeout=120):
+    """End battle and return to village. Gives up after `timeout` seconds
+    (it used to loop forever if Return Home never appeared)."""
     logging.debug("Entering finishBattleAndGoHome")
-    while True:
-        pos = locate_image("misc/end_battle.png")
+    deadline = time.time() + timeout
+    checks = 0
+    while time.time() < deadline:
+        if checks % 8 == 0:
+            activate_game_window()   # another window may have taken focus and covered the game
+        checks += 1
+        pos = locate_image("misc/end_battle.png", retries=1)
         if pos:
             pyautogui.click(pos)
             updateTimestamp('_lastInteraction')
@@ -258,6 +391,130 @@ def finishBattleAndGoHome():
             #trainTroops()
             return True
         time.sleep(1)
+    logging.error(f"Return Home button not found after {timeout}s")
+    return False
+
+
+LDPLAYER_DIR = r"C:\LDPlayer\LDPlayer9"
+COC_PACKAGE = "com.supercell.clashofclans"
+
+def _screen_frozen(seconds=3.0):
+    """The game always animates (water, flags, troops). An unchanged window
+    for a few seconds means the emulator hung — live, Android's System UI
+    stopped responding and the last frame (Battle button included) stayed on
+    screen, so every attack failed while recovery thought it was home."""
+    try:
+        win = gw.getWindowsWithTitle("LDPlayer")[0]
+        region = (win.left + 10, win.top + 40, win.width - 70, win.height - 50)
+        a = np.array(pyautogui.screenshot(region=region)).astype(np.int16)
+        time.sleep(seconds)
+        b = np.array(pyautogui.screenshot(region=region)).astype(np.int16)
+        return int((np.abs(a - b).sum(axis=2) > 30).sum()) < 50
+    except Exception:
+        return False
+
+def _ldconsole(*args, timeout=60):
+    import subprocess
+    try:
+        subprocess.run([os.path.join(LDPLAYER_DIR, "ldconsole.exe"), *args],
+                       timeout=timeout, capture_output=True)
+    except Exception:
+        logging.error(f"ldconsole {args} failed: {traceback.format_exc()}")
+
+def _close_android_anr():
+    """Tap 'Close app' on Android's '<app> isn't responding' dialog, if shown."""
+    try:
+        win = gw.getWindowsWithTitle("LDPlayer")[0]
+        img = pyautogui.screenshot(region=(win.left, win.top, win.width, win.height))
+        data = pytesseract.image_to_data(img, output_type=pytesseract.Output.DICT)
+        words = [w.lower() for w in data["text"]]
+        if not any("responding" in w for w in words):
+            return False
+        for i, w in enumerate(words[:-1]):
+            if w == "close" and words[i + 1].startswith("app"):
+                pyautogui.click(win.left + data["left"][i] + data["width"][i] // 2,
+                                win.top + data["top"][i] + data["height"][i] // 2)
+                logging.warning("[RECOVER] Closed an Android 'isn't responding' dialog")
+                time.sleep(5)
+                return True
+    except Exception:
+        logging.error(f"ANR check failed: {traceback.format_exc()}")
+    return False
+
+def _clear_launch_popups():
+    """LDPlayer's top-up ad and the game's 'Welcome back' / 'Okay' popups."""
+    for _ in range(3):
+        for img in ("misc/ld_ad_close.png", "misc/welcome_okay.png", "misc/end_ok.png"):
+            pos = locate_image(img, retries=1)
+            if pos:
+                pyautogui.click(pos)
+                time.sleep(2)
+
+def restart_game():
+    """Relaunch Clash; reboot the emulator if it is still frozen after that."""
+    if not os.path.exists(os.path.join(LDPLAYER_DIR, "ldconsole.exe")):
+        logging.error("[RECOVER] ldconsole.exe not found — can't restart the game")
+        return False
+    logging.warning("[RECOVER] Game frozen — restarting Clash of Clans")
+    _ldconsole("killapp", "--index", "0", "--packagename", COC_PACKAGE)
+    time.sleep(3)
+    _ldconsole("runapp", "--index", "0", "--packagename", COC_PACKAGE)
+    time.sleep(45)
+    activate_game_window()
+    _close_android_anr()
+    if _screen_frozen():
+        logging.warning("[RECOVER] Still frozen — rebooting the emulator")
+        _ldconsole("reboot", "--index", "0")
+        time.sleep(90)
+        for _ in range(4):
+            activate_game_window()
+            if not _close_android_anr():
+                break
+        _ldconsole("runapp", "--index", "0", "--packagename", COC_PACKAGE)
+        time.sleep(60)
+        activate_game_window()
+        _close_android_anr()
+    _clear_launch_popups()
+    ok = not _screen_frozen()
+    logging.warning(f"[RECOVER] Game restart {'succeeded' if ok else 'did NOT unfreeze the game'}")
+    return ok
+
+def recover_to_home(max_rounds=6):
+    """Get back to the home village from whatever screen the bot is stuck on
+    (results screen, a popup, the match-finder, a battle that never ended).
+    Returns True once the home Battle button is visible."""
+    activate_game_window()
+    if _screen_frozen():
+        restart_game()
+        activate_game_window()
+    for rnd in range(1, max_rounds + 1):
+        if locate_image("misc/attack_button.png", retries=1):
+            logging.info(f"[RECOVER] Home screen reached (round {rnd})")
+            return True
+        for img in ("misc/end_battle.png",        # Return Home (results screen)
+                    "misc/battle_screen.png",     # End Battle (battle still running)
+                    "misc/end_ok.png",            # Okay (end-battle confirm)
+                    "misc/surrender.PNG",         # Surrender (troops already deployed)
+                    "misc/welcome_okay.png",      # 'Welcome back Chief' after a reload
+                    "misc/ld_ad_close.png",       # LDPlayer top-up ad over the game
+                    "misc/surrender_ok.PNG",
+                    "Close_Btn.PNG",
+                    "misc/close.PNG"):
+            pos = locate_image(img, retries=1)
+            if pos:
+                logging.warning(f"[RECOVER] round {rnd}: clicking {img} at {pos}")
+                pyautogui.click(pos)
+                time.sleep(2)
+                break
+        else:
+            logging.warning(f"[RECOVER] round {rnd}: nothing recognised on screen")
+            time.sleep(3)
+    logging.error("[RECOVER] Could not get back to the home screen")
+    try:
+        pyautogui.screenshot(f"stuck_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.png")
+    except Exception:
+        pass
+    return False
 
 # ---------------------------------------------------------
 #  AI DEPLOY — heat-map + lead-ahead spell targeting (rage only)
@@ -453,6 +710,61 @@ def _deploy_spell_batch(fixed_positions, ai_prior_points, jitter=5, delay=0.2, l
         ai_prior_points.append(pt)
         time.sleep(delay)
 
+def _select_slot(image_path):
+    """Tap a troop/spell slot. Returns its position, or None (tapping nothing) if the icon
+    isn't on screen — pyautogui.click(None) would otherwise click wherever
+    the mouse is and the following deploy taps would drop whatever was
+    selected before."""
+    pos = locate_image(image_path)
+    if not pos:
+        logging.warning(f"Slot '{image_path}' not found — skipping its deployment")
+        return None
+    pyautogui.click(pos)
+    return pos
+
+# Far-left map edge — legal on every base seen live (Queen/siege land here)
+LEFTOVER_DROP_POSITIONS = [(207, 353), (230, 337), (242, 327), (238, 374)]
+
+def _slot_has_units(slot_pos):
+    """A troop slot is in colour while it has units left and turns grey at x0."""
+    x, y = int(slot_pos[0]), int(slot_pos[1])
+    img = np.array(pyautogui.screenshot(region=(x - 30, y - 30, 60, 60)))
+    return cv2.cvtColor(img, cv2.COLOR_RGB2HSV)[:, :, 1].mean() >= 60
+
+def _deploy_leftovers(slot_pos, label, max_taps=12):
+    """On bigger bases some fixed drop points fall inside the red no-deploy
+    area and those units stay in the slot. Drop whatever is left on the map
+    edge (the slot is still selected)."""
+    time.sleep(0.3)
+    taps = 0
+    while taps < max_taps and _slot_has_units(slot_pos):
+        x, y = LEFTOVER_DROP_POSITIONS[taps % len(LEFTOVER_DROP_POSITIONS)]
+        pyautogui.click(x + randint(-5, 5), y + randint(-5, 5))
+        taps += 1
+        time.sleep(0.15)
+    if taps:
+        logging.warning(f"{label}: {taps} leftover unit(s) dropped on the map edge")
+
+def _hero_slot_used(slot_pos, wait=2.0):
+    """True once the hero is on the field. Live-checked slot states:
+    undeployed = portrait in colour, no bar; deployed = green health bar on
+    top of the slot (portrait stays in colour while still selected); dead =
+    grey/dark portrait, no bar. Polls for up to `wait` seconds."""
+    x, y = int(slot_pos[0]), int(slot_pos[1])
+    deadline = time.time() + wait
+    while True:
+        img = cv2.cvtColor(np.array(pyautogui.screenshot(region=(x - 45, y - 75, 75, 105))),
+                           cv2.COLOR_RGB2HSV)
+        bar = img[0:12, 0:70]                        # health bar strip
+        h, s, v = bar[:, :, 0], bar[:, :, 1], bar[:, :, 2]
+        green = int(((h >= 35) & (h <= 85) & (s > 100) & (v > 120)).sum())
+        sat = img[45:105, 15:75, 1].mean()           # portrait
+        used = green > 100 or sat < 60
+        if used or time.time() >= deadline:
+            logging.debug(f"Hero slot {slot_pos}: bar={green} saturation={sat:.0f} used={used}")
+            return used
+        time.sleep(0.25)
+
 def deployTroops():
     """Deploy troops with strategic positioning and slight randomness."""
     logging.debug("Deploying troops")
@@ -542,18 +854,22 @@ def deployTroops():
                     time.sleep(0.1)
 
         # Deploy **Electro Dragons**
-        pyautogui.click(locate_image("troops/troops_electro.png"))
-        time.sleep(0.5)
-        for x, y in electro_dragon_positions:
-            pyautogui.click(x + randint(-10, 10), y + randint(-10, 10))
-            time.sleep(0.1)
+        electro_slot = _select_slot("troops/troops_electro.png")
+        if electro_slot:
+            time.sleep(0.5)
+            for x, y in electro_dragon_positions:
+                pyautogui.click(x + randint(-10, 10), y + randint(-10, 10))
+                time.sleep(0.1)
+            _deploy_leftovers(electro_slot, "Electro Dragons")
 
         # Deploy **Balloons**
-        pyautogui.click(locate_image("troops/troops_loon.png"))
-        time.sleep(0.1)
-        for x, y in balloon_positions:
-            pyautogui.click(x + randint(-10, 10), y + randint(-10, 10))
+        loon_slot = _select_slot("troops/troops_loon.png")
+        if loon_slot:
             time.sleep(0.1)
+            for x, y in balloon_positions:
+                pyautogui.click(x + randint(-10, 10), y + randint(-10, 10))
+                time.sleep(0.1)
+            _deploy_leftovers(loon_slot, "Balloons")
 
         # Deploy **Warden**
         warden_pos = locate_image("heros/warden.PNG")
@@ -569,7 +885,8 @@ def deployTroops():
             pyautogui.click(prince_position[0] + randint(-5, 5), prince_position[1] + randint(-5, 5))   
         # Wait **3 seconds**, then enable **Warden Ability**
         time.sleep(3)
-        pyautogui.click(warden_pos)
+        if warden_pos:
+            pyautogui.click(warden_pos)
         if prince_pos:
             time.sleep(1)
             pyautogui.click(prince_pos)
@@ -577,8 +894,17 @@ def deployTroops():
         if rc_pos:
             pyautogui.click(rc_pos)
             time.sleep(0.1)
-            pyautogui.click(rc_position[0] + randint(-5, 5), rc_position[1] + randint(-5, 5))
-            pyautogui.click(rc_pos)
+            # rc_position sits at the top edge of the map; on some bases' scenery
+            # it isn't a legal drop and the Champion sat out the attack (2 of 4
+            # live attacks), so fall back to the troop lane.
+            # Last resort: the far-left map edge where the Queen and siege
+            # barracks land — legal on every base seen live.
+            for x, y in (rc_position, rc_fallback_position, archer_queen_position):
+                pyautogui.click(x + randint(-5, 5), y + randint(-5, 5))
+                if _hero_slot_used(rc_pos):
+                    pyautogui.click(rc_pos)   # ability
+                    break
+                logging.warning(f"Royal Champion not deployed at ({x}, {y}) — trying next spot")
         baby_dragon_pos = locate_image("troops/troop_babydragon.PNG")
         if baby_dragon_pos:
             pyautogui.click(baby_dragon_pos)
@@ -590,13 +916,13 @@ def deployTroops():
         # so a later rage cast never stacks on an earlier one. Freeze doesn't
         # use AI Deploy (see note above), so it doesn't touch this list.
         ai_spell_drop_points = []
-        pyautogui.click(locate_image("troops/rage_spell.PNG"))
-        time.sleep(0.5)
-        _deploy_spell_batch(rage_spell_positions[:2], ai_spell_drop_points)
+        if _select_slot("troops/rage_spell.PNG"):
+            time.sleep(0.5)
+            _deploy_spell_batch(rage_spell_positions[:2], ai_spell_drop_points)
 
-        # Wait **4 seconds**, then deploy **next 2 Rage Spells**
-        time.sleep(9)
-        _deploy_spell_batch(rage_spell_positions[2:], ai_spell_drop_points)
+            # Wait **4 seconds**, then deploy **next 2 Rage Spells**
+            time.sleep(9)
+            _deploy_spell_batch(rage_spell_positions[2:], ai_spell_drop_points)
 
         # Deploy **Freeze Spells** together — always the fixed positions,
         # never AI Deploy. Without real defense detection, an AI-aimed
@@ -607,11 +933,11 @@ def deployTroops():
         # it just needs to catch the troops themselves, which AI Deploy
         # reliably found in testing.
         time.sleep(1)
-        pyautogui.click(locate_image("troops/freez_spell.PNG"))
-        time.sleep(0.5)
-        for x, y in freeze_spell_positions:
-            pyautogui.click(x + randint(-5, 5), y + randint(-5, 5))
-            time.sleep(0.2)
+        if _select_slot("troops/freez_spell.PNG"):
+            time.sleep(0.5)
+            for x, y in freeze_spell_positions:
+                pyautogui.click(x + randint(-5, 5), y + randint(-5, 5))
+                time.sleep(0.2)
 
         # Deploy **New Troop** (after all troops, spells, and heroes)
         new_troop_pos = locate_image("troops/newtroop.png")
@@ -626,16 +952,23 @@ def deployTroops():
     logging.info("Troop and spell deployment complete")
     return True
 
-def zoomOutBuilderBase():
-    """Zoom out on the builder base battlefield so the whole base is visible.
-    The fixed deploy-position coordinates (electro_dragon_positions,
-    balloon_positions, b_hero_position) were captured against a zoomed-out
-    view — without this, taps land on the wrong world location and troops
-    silently fail to deploy even though the deploy button itself was found."""
-    logging.debug("Zooming out builder base battlefield")
+def zoomOutBattlefield():
+    """Zoom out on the battlefield (main village or builder base) so the whole
+    base is visible. The fixed deploy-position coordinates
+    (electro_dragon_positions, balloon_positions, rage/freeze positions, ...)
+    were captured against a zoomed-out view — without this, taps land on the
+    wrong world location and troops silently fail to deploy even though the
+    deploy button itself was found. The battle inherits the home village
+    zoom, and tapping a Wall row during wall upgrades zooms the village in,
+    so this is needed on every attack. Scroll only — no tap, since a tap on
+    the battlefield could deploy a troop."""
+    logging.debug("Zooming out battlefield")
     try:
         if not activate_game_window():
             return False
+        # Hover (no click) over the battlefield so the scroll zooms the map
+        # rather than landing on the troop bar / Next button.
+        pyautogui.moveTo(WINDOW_X + 640, WINDOW_Y + 300)
         pyautogui.keyDown('ctrl')
         time.sleep(0.1)
         for _ in range(5):
@@ -643,10 +976,10 @@ def zoomOutBuilderBase():
             time.sleep(0.2)
         pyautogui.keyUp('ctrl')
         time.sleep(0.3)
-        logging.info("Builder base battlefield zoomed out")
+        logging.info("Battlefield zoomed out")
         return True
     except Exception:
-        logging.error(f"Failed to zoom out builder base battlefield: {traceback.format_exc()}")
+        logging.error(f"Failed to zoom out battlefield: {traceback.format_exc()}")
         try:
             pyautogui.keyUp('ctrl')
         except Exception:
@@ -679,7 +1012,7 @@ def startAttackingBuilder():
                 logging.info("Builder battle screen detected")
                 # Zoom out immediately so the whole village is visible before
                 # any troop is deployed — deploy coordinates depend on this.
-                zoomOutBuilderBase()
+                zoomOutBattlefield()
                 time.sleep(0.5)
                 return True
             time.sleep(1)
@@ -900,7 +1233,7 @@ def attackBuilderBase():
 
 def zoomOutBuilderVillageHome():
     """Zoom out fully on the Builder Base HOME village view (as opposed to
-    zoomOutBuilderBase(), which zooms the attack battlefield). No center-tap
+    zoomOutBattlefield(), which zooms the attack battlefield). No center-tap
     afterward — live-verified that tapping the window center to "center the
     base" can land on a building (Wall, Gold Storage, ...) and pop open its
     info/upgrade tray; the Builder Base map is small enough to already fit
@@ -992,10 +1325,9 @@ def attack():
         if deployTroops():
             # End battle in 1 min
             time.sleep(60)
-            pyautogui.click(locate_image("misc/battle_screen.png"))
-            time.sleep(1.5)
-            pyautogui.click(locate_image("misc/end_ok.png"))
-            finishBattleAndGoHome()
+            endBattle()
+            if not finishBattleAndGoHome():
+                return False
             # Delete saved gold region screenshots
             for file in gold_region_files:
                 try:
@@ -1021,10 +1353,9 @@ def attack():
                     time.sleep(120)
                 else:
                     time.sleep(60)
-                pyautogui.click(locate_image("misc/battle_screen.png"))
-                time.sleep(1.5)
-                pyautogui.click(locate_image("misc/end_ok.png"))
-                finishBattleAndGoHome()
+                endBattle()
+                if not finishBattleAndGoHome():
+                    return False
                 # Delete saved gold region screenshots
                 for file in gold_region_files:
                     try:
@@ -1042,7 +1373,7 @@ def attack():
             logging.error("Next opponent failed")
             return False
     logging.warning("No suitable opponent found after 20 attempts")
-    return True
+    return False   # still on the scouting screen — the caller recovers to home
 
 def nextOpponent() -> bool:
     """Skip to next opponent."""
@@ -1090,6 +1421,13 @@ def startAttacking():
         find_match_btn = locate_image(find_match_image)
         if find_match_btn:
             break
+        if i in (1, 4):
+            # The first tap right after returning home is sometimes swallowed
+            # (live) — if the home Battle button is still there, tap it again.
+            again = locate_image("misc/attack_button.png", retries=1)
+            if again:
+                logging.warning("Find match screen didn't open — tapping attack button again")
+                pyautogui.click(again)
         time.sleep(2)
 
     if not find_match_btn:
@@ -1131,6 +1469,11 @@ def startAttacking():
     for i in range(CONFIG['battle_wait_timeout']):
         if locate_image(battlescreen_image):
             logging.info("Battle screen detected")
+            # Let the battle's opening camera move finish first — a zoom sent
+            # during it is swallowed and the base stays zoomed in.
+            time.sleep(2)
+            zoomOutBattlefield()
+            time.sleep(0.5)
             return True
         time.sleep(1)
 
@@ -1339,8 +1682,23 @@ def _bot_monitor(stop_event):
             if pos:
                 logging.warning("[MONITOR] 'Are you there?' detected — restarting game")
                 try:
-                    reload_pos = pyautogui.locateCenterOnScreen("misc/reloadgame.png", confidence=0.8)
-                    pyautogui.click(reload_pos if reload_pos else pos)
+                    # locateCenterOnScreen raises (not returns None) when the
+                    # image is missing, which used to skip the click entirely.
+                    # misc/reloadgame.png is captured at a larger text size
+                    # than the popup uses, so try the 118x26 one too, then
+                    # fall back to where "RELOAD GAME" sits inside the
+                    # areyouthere.png popup (231px left, 59px below centre).
+                    reload_pos = None
+                    for img in ("misc/reloadgame.png", "reloadgame.PNG"):
+                        try:
+                            reload_pos = pyautogui.locateCenterOnScreen(img, confidence=0.8)
+                        except Exception:
+                            reload_pos = None
+                        if reload_pos:
+                            break
+                    if not reload_pos:
+                        reload_pos = (pos[0] - 231, pos[1] + 59)
+                    pyautogui.click(reload_pos)
                     time.sleep(15)
                     activate_game_window()
                 except Exception:
@@ -1405,23 +1763,36 @@ def run_wall_upgrades():
         return
 
     logging.info("Wall upgrade check triggered")
-    CONTINUE_ON = {"UPGRADED_WITH_GOLD", "UPGRADED_WITH_ELIXIR", "UPGRADED"}
+    # Only a confirmed spend continues the loop. "UPGRADED" (dialog closed
+    # but no readable spend) once repeated 5x while a popup was swallowing
+    # every Confirm — it still counts, but ends this check.
+    CONTINUE_ON = {"UPGRADED_WITH_GOLD", "UPGRADED_WITH_ELIXIR"}
     upgraded = 0
+    result = None
+
+    MAX_WALLS_PER_CHECK = 50   # hard stop in case success is ever misdetected
 
     try:
         _wall.activate_game_window()   # sync wall module's window coords
-        while True:
+        for _ in range(MAX_WALLS_PER_CHECK):
             result = _wall.upgrade_wall()
             logging.info(f"Wall upgrade result: {result}")
-            if result in CONTINUE_ON:
+            if result in CONTINUE_ON or result == "UPGRADED":
                 upgraded += 1
                 walls_this_session += 1
-            else:
+            if result not in CONTINUE_ON:
                 break
     except Exception:
         logging.error(f"Wall upgrade error: {traceback.format_exc()}")
 
+    try:
+        # Don't leave the side panel covering the Battle button for the next attack
+        _wall.close_builder_panel()
+    except Exception:
+        logging.warning(f"Could not close builder panel: {traceback.format_exc()}")
+
     logging.info(f"Wall upgrade session complete — {upgraded} wall(s) upgraded")
+    return result   # last upgrade_wall() status, e.g. "WALL_NOT_FOUND" once walls are maxed
 
 
 def main_loop():
@@ -1660,6 +2031,11 @@ if __name__ == "__main__":
                         logging.info(f"Attack #{attack_count}: checking Builder Base elixir cart")
                         collectBuilderElixirCart()
                         _update_heartbeat()
+                elif not CONFIG['builder_base']:
+                    # A failed attack leaves the bot on whatever screen it
+                    # stopped at; without this every later attempt fails too.
+                    recover_to_home()
+                    _update_heartbeat()
 
                 time.sleep(30)
             except KeyboardInterrupt:
