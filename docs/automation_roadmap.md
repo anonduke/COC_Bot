@@ -27,6 +27,36 @@ Date: 2026-11-13. Machine tested: DESKTOP-GSD3MHF, LDPlayer 9.1.67, TH18 account
    A lifecycle manager that starts and stops the emulator per session addresses most of this. It should be built *early*, not at Phase 5.
 7. **Event-driven scheduling makes 1–5 hour polling unnecessary.** While the emulator is off, the village can only change in two ways: timers counting down (fully predictable from the export) and enemy raids (which only cost resources). Re-reading the village every few hours would mean booting the emulator just to learn what we already know. Instead, **read the village at the start and end of every session.** Add a configurable "health check" session (e.g. every 12 h) only to catch manual play on another device.
 
+### Phase 0 findings (2026-11-14)
+- **Host is CPU-bound.** The PC has an i3-6006U (2 cores / 4 threads) and Intel HD 520 graphics. With the game idle, host CPU sat at 100%: AnyDesk ~65% and the emulator (`Ld9BoxHeadless`) ~65%, roughly half each. AnyDesk encodes the screen while a remote session is open. The LAN dashboard (Phase 9) removes the need to keep AnyDesk connected.
+- **Emulator tuning.** I ran `ldconsole globalsetting --fps 30 --audio 0`. It turned out that sets only the global default (`leidians.config` `framesPerSecond`); the instance keeps its own `basicSettings.fps: 60` in `leidian0.config`. I tried 30 on the instance and went back to 60 when chasing the display problem below; fps was not the cause. Resolution and window size are unchanged, because the bot's coordinates depend on them.
+- **Likely root cause of the freezes: Windows turns the display off** (idle run 2 confirms or refutes). The power plan switches the display off after 5 minutes without input.
+  - With no active display, the Intel GPU stops presenting the emulator's OpenGL frames. LDPlayer's own window chrome still repaints, so it looks alive, but the Android picture stops.
+  - Most likely, Android then waits on frames that never complete: System UI can't draw → "System UI isn't responding", and after longer idle the whole graphics stack hangs. (The mechanism is inferred; the symptoms and the fix below are observed.)
+  - The 2 h idle test showed exactly this: fine for 80 min, then at 10:39 a System UI ANR, `SurfaceFlinger: Timed out waiting for hw vsync`, `WATCHDOG KILLING SYSTEM PROCESS … ThreadedRenderer`, and `surfaceflinger` stuck in uninterruptible sleep. Only an emulator restart recovers from that.
+  - Reboots with the display still off came back to LDPlayer's boot screen frozen at "94%", even though adb showed Android fully booted with Clash in front. Forcing the display on (`SetThreadExecutionState(ES_DISPLAY_REQUIRED)` plus one key press) made the real picture appear immediately.
+  - This would also explain why the attack loop has been stable: its clicks count as input and keep the display awake. Idle time between sessions does not.
+  - **Fix:** the bot process holds `ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED` for as long as it runs (no system setting change needed). Alternatively, set the display timeout to "never" in Windows power options.
+- **System UI hang on boot** (every boot today). **Fix without any screen taps:** `adb shell "su 0 kill -9 <pid of com.android.systemui>"`. System UI restarts in seconds. Detection, also without screen reading: `dumpsys window | grep mCurrentFocus` contains `Application Not Responding: com.android.systemui`. It may be a symptom of the display being off (above); the second idle test will tell.
+- **Frozen-picture detection.** adb alone can't see this failure: Clash can be focused and running while the picture is frozen. Compare two window captures a few seconds apart; the village always animates, so zero changed pixels means frozen.
+- **Boot timing:** `ldconsole launch` → `sys.boot_completed=1` in about 59 s. Launching via `adb shell monkey -p com.supercell.clashofclans -c android.intent.category.LAUNCHER 1` gives `GameApp` focus within 5 s.
+- **LDPlayer ad windows** are top-level Win32 windows owned by `dnplayer.exe`. Seen so far: classes `adframe` (side panel) and `ADFullScreenFrame` (full-screen promo). Both hide with `ShowWindow(hwnd, SW_HIDE)`. The in-game "Top-Up" ad is drawn inside the emulator and is closed with the existing `misc/ld_ad_close.png`.
+- **The game's own data tables are readable** (this decides the Phase 2 data source).
+  - They sit in `split_install_time_asset_pack.apk` → `assets/logic/*.csv`.
+  - Each file has a `Sig:` header (64 bytes) followed by LZMA with a 4-byte size field, which the Python stdlib `lzma` decodes.
+  - `buildings.csv` has `GlobalID`, which matches the export's `data` IDs exactly: every ID in the live export resolved. It also has per-level `BuildTimeD/H/M/S`, `BuildResource`, `BuildCost` and `TownHallLevel`.
+  - `heroes.csv`, `townhall_levels.csv` (max count/level per TH) and `deeplinks.csv` are also available.
+  - This data updates itself with every game patch: re-extract when `versionName` changes (now 18.647.5).
+- **Deep links available** (from `deeplinks.csv`): `Home`, `OpenAttackScreen`, `OpenHeroHall`, `OpenLaboratory`, `OpenPetHouse`, `OpenBlacksmith`, `OpenMoreSettings`, `SelectGameObject(name)` and more. `SelectGameObject&name=Archer Tower` had no visible effect in a first test; this is for Phase 5 to investigate.
+- **"Anyone there? You have been disconnected due to inactivity"** appears after idling on the home screen. It dims the screen, so every OCR read returns 0. Sessions must clear it before reading anything; the existing watchdog handles it during attacks.
+- **The village changed while the bot was off** (between 2026-11-13 23:20 and 2026-11-14 ~09:00):
+  - gold 23.69M → 21.46M;
+  - elixir 24.11M → 10.95M;
+  - dark elixir 370K → 324K;
+  - gems 5,092 → 4,875.
+
+  These changes are from manual play on another device or raids. The design must expect this: the export always wins (§4.2.5).
+
 ---
 
 ## 1. Existing project analysis
@@ -71,7 +101,7 @@ Date: 2026-11-13. Machine tested: DESKTOP-GSD3MHF, LDPlayer 9.1.67, TH18 account
 | Dark elixir | Storage OCR (**new**: one more region + digit samples) | Needed for hero upgrades. |
 | Gems | OCR (**new**) | Used as a safety guard (R7), not for spending. |
 | Free builders "x/y" | Builder counter OCR (existing `read_builder_count`) | Cross-checks the export. |
-| Upgrade costs, durations, max level per TH | **Static game data** (Phase 2 research) | Options: (a) ClashKing's static data JSON (used by Clash Max); (b) the game's own CSVs extracted from the installed APK. Must map export `data` IDs (e.g. 1000001 = Town Hall, 1000010 = Wall, 1000015 = Builder's Hut) to names, costs and times. |
+| Upgrade costs, durations, max level per TH | **The game's own CSVs, extracted from the installed APK** (verified, see Phase 0 findings) | `GlobalID` matches the export's `data` IDs exactly (1000001 = Town Hall, 1000010 = Wall, 1000015 = Builder's Hut). Re-extract automatically when the game version changes. No third-party data source needed. |
 | Profile cross-check | Official API (optional) | Hero/troop levels only. Possible later "sanity check" feature, not required. |
 
 ### Export format observed (top-level keys)
@@ -150,13 +180,13 @@ Seven components rather than thirteen. Fewer moving parts means fewer ways to br
 
 | Component | Responsibility | Built from |
 |---|---|---|
-| **Emulator manager** | Is LDPlayer running? Start it; wait for `sys.boot_completed`; hide the `adframe` ad window; close ANRs; launch Clash (adb intent, not a fixed sleep); confirm Clash is the resumed activity (`dumpsys`); shut down; hard reboot. | `ldconsole`, `adb`, Win32. Replaces `restart_game`. |
+| **Emulator manager** | Keep the Windows display awake; is LDPlayer running? Start it; wait for `sys.boot_completed`; hide the `adframe` ad window; close ANRs; detect a frozen picture; launch Clash (adb intent, not a fixed sleep); confirm Clash is the resumed activity (`dumpsys`); shut down; hard reboot. | `ldconsole`, `adb`, Win32. Replaces `restart_game`. |
 | **Game driver** | Screen recognition (home, popups, ads, Welcome back), deep-link navigation, data export, generic "upgrade X via builder list", resource OCR, gem guard. Farming calls the existing `attack()`/`recover_to_home()`. | `wall.py` and `Ranked_Copy.py` logic, wrapped in an adapter. No rewrite. |
 | **Village state** | Parse the export, map IDs to names via static data, compute builder jobs and free times, store snapshots, diff old vs new (used for verification). | New, pure Python, fully unit-testable. |
 | **Planner** | Plan items, eligibility, lane simulation, farming targets per upcoming item. | New, pure, unit-testable. |
 | **Scheduler / session runner** | Persisted events (`builder_free`, `health_check`, `retry_after_failure`); groups events within a window into one session; runs the session state machine; resumes after a crash. | New. |
 | **Store** | SQLite tables: snapshots, plan items, settings, events, sessions, action journal, notifications. | New. |
-| **Dashboard + notifier** | Local web UI; alerts for critical failures. | New, separate process. |
+| **Dashboard + notifications** | LAN web UI with actions; notifications area for errors and alerts. | New, separate process. |
 
 ### 4.1 Key decisions and why
 
@@ -174,8 +204,8 @@ Seven components rather than thirteen. Fewer moving parts means fewer ways to br
   3. **Temporary** overrides held in memory for the current run only, shown as "temporary" in the UI.
 
   Per-machine coordinates stay in `wall.py` profiles.
-- **Dashboard: local web UI** (FastAPI or Flask, server-rendered pages + SortableJS for drag and drop), on `localhost` and optionally your LAN. It is a separate process from the bot, so a UI crash can't kill the bot, and you can check it from your phone. The existing Tkinter panel stays for manual attack/wall mode.
-- **Notifications**: Telegram bot or ntfy.sh push. That means sending data (status text only) to an external service, so I won't set this up without your go-ahead.
+- **Dashboard: local web app on your LAN** (decided 2026-11-14). FastAPI or Flask, server-rendered pages + SortableJS for drag and drop. Reachable from another PC or a phone on the same network. It is a separate process from the bot, so a UI crash can't kill the bot. It **takes actions** too (pause, resume, run a session now, skip an item, edit the plan); those go through the store as commands that the orchestrator picks up at its next safe step, never by driving the game directly. No login screen is planned for a home LAN; a simple shared token can be added if you want one. The existing Tkinter panel stays for manual attack/wall mode.
+- **Notifications: a notifications area in the web page** (decided 2026-11-14). Errors, aborted sessions, gem-guard trips and recoveries are stored in SQLite with severity and a screenshot link, shown newest-first with unread counts, and can be acknowledged. No external notification service.
 
 ### 4.2 Reliability rules
 
@@ -208,6 +238,7 @@ Each phase ends with written test results and an acceptance sign-off from you.
   - Tune the LDPlayer instance (CPU/RAM allocation, update LDPlayer, check ad and notification settings) to reduce System UI ANRs.
   - Record a screenshot corpus of every popup seen so far.
 - **Acceptance:** 2 h idle on the home screen without an ANR, or ANR frequency measured and logged.
+- **Result (run 1, display allowed to turn off):** failed at 80 min with a full graphics hang; cause found (see Phase 0 findings). Run 2 holds the display on.
 
 ### Phase 1: Analysis (this document)
 - **Acceptance:** you approve the architecture and phase order.
@@ -238,6 +269,8 @@ Each phase ends with written test results and an acceptance sign-off from you.
 ### Phase 4: Emulator lifecycle manager (moved up)
 - **Objectives:** cold start → village ready → shutdown, unattended.
 - **Tasks:**
+  - Hold the Windows display awake for the whole time the bot runs.
+  - Frozen-picture detection (two captures, zero change → restart the emulator).
   - Boot detection via adb.
   - Win32 hiding of the `adframe` ad and the launcher top-up ad.
   - ANR closing.
@@ -298,6 +331,8 @@ Each phase ends with written test results and an acceptance sign-off from you.
 - **Acceptance:** 72 h unattended live with zero duplicate actions, zero gem spend, and every builder idle-gap explained.
 
 ### Phase 9: Dashboard and notifications
+- **Served on the LAN** so it works from another PC or a phone; actions go through the store as commands (§4.1).
+- **Notifications area** on every page: errors, aborted sessions, gem-guard trips, recoveries; acknowledge to clear.
 - **Pages:**
   - Overview (TH, resources, builders, timers);
   - Plan editor with drag-and-drop and lanes timeline;
@@ -317,7 +352,7 @@ Each phase ends with written test results and an acceptance sign-off from you.
 | # | Risk | Impact | Mitigation |
 |---|---|---|---|
 | R1 | **Account ban.** Automation breaks Supercell's Terms of Service. 24/7 unattended, regular patterns raise detection risk. | Account loss | Your decision. Use active hours, jitter, realistic attack pacing and caps on daily attacks. |
-| R2 | **Emulator instability** (System UI ANR, frozen frames, screencap hang) | Stuck sessions | Short sessions with a fresh boot; frozen-frame and ANR detection; escalation; Phase 0 tuning. |
+| R2 | **Emulator instability** (System UI ANR, frozen frames, screencap hang) | Stuck sessions | Keep the display awake (root cause found in Phase 0); short sessions with a fresh boot; frozen-frame and ANR detection; escalation. |
 | R3 | **Needs the desktop unlocked and LDPlayer uncovered** | No true background run; PC unusable during sessions | Phase 4 spike: `adb input` for taps + window capture without focus. Otherwise: dedicated PC, auto-login, no sleep or lock. |
 | R4 | **Game updates** change the UI, the templates, the export format or the deep links | Silent breakage | Template-confidence monitoring; schema check on the export; a "degraded → pause + notify" mode. |
 | R5 | **Static data lags** new game levels | Wrong costs or eligibility | Fall back to costs read from the upgrade dialog (Phase 5 reads them anyway); the export remains the truth for levels and timers. |
