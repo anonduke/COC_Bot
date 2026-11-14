@@ -339,6 +339,34 @@ Code: `village/` package, tests in `tests/` (`python -m unittest discover -s tes
   - The "not enough resources" and "no free builder" paths.
 - **Acceptance:** 100 % correct target selection in dry runs; no unverified action left in the journal.
 
+#### Phase 5 progress: dry run (2026-11-14, started early at your request)
+`village/upgrader.py`, `python -m village dryrun --queue | --name NAME --from LEVEL`, and a "Dry run next step" button on the dashboard's queue page. Results (rows opened, dialog titles, screenshots) appear under Alerts.
+- **How it works:**
+  1. Home screen.
+  2. Tap the builder counter to open the **Buildings & Heroes** panel.
+  3. Read the row titles with Tesseract; in-progress rows (green bars) are skipped.
+  4. Tap a matching row: the game opens **"Upgrade <name> to Level N?"** directly.
+  5. Read the title, save a screenshot, close with X.
+  6. Wrong level: keep looking. The panel has one row per level group, e.g. your Wizard Towers at 13 and 8 are separate rows.
+- **Dry run never confirms.** There is no function in the module that taps Confirm; a test checks this.
+- **Live results:**
+  - Wizard Tower 8 → 9 was found in all four runs. Each time it first opened the level-13 tower's dialog ("to Level 14"), rejected it, then found "to Level 9". The price was 520,000 gold (1,300,000 before an event discount), 9h 30m instead of 1d.
+  - Dragon Duke 23 → 24 was found. Its price was shown in **red** (184,000 dark elixir vs 163,132 owned); the dry run now reports that as "not enough resources".
+  - Gold, elixir, dark elixir, gems and the builder counter were unchanged after every run.
+- **What the dialog offers:**
+  - Two Confirm buttons: resources, and a magic item (Hammer of Building / Hammer of Heroes).
+  - Prices can be discounted by events, so the dialog, not the game tables, is the truth for costs.
+  - Reading the price digits (white or lime on green) is not solved yet; screenshots are kept instead.
+- **Panel scrolling is the hard part.**
+  - adb drags that start on a row act as a **tap** on that row: they open its dialog. Live, a Crafting Station dialog opened with an option pre-selected and Confirm showing. Nothing was confirmed; it was closed with X.
+  - Mouse-wheel events via `sendevent` (touchscreen and mouse devices) did not scroll.
+  - Drags now start in the gap between two rows, on a settled frame, re-checked just before. About one drag per run still lands as a tap; a dialog check after every drag closes it.
+- **Before the confirming version (5b):**
+  - re-verify the dialog title on the exact frame Confirm is tapped;
+  - refuse red prices;
+  - detect the "need more" and "builders busy" offers (wall.py's lessons);
+  - verify through the export diff afterwards.
+
 ### Phase 6: Planner and plan management
 - **Objectives:** plan items, eligibility, lane simulation, overrides, templates.
 - **Tests:**

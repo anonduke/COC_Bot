@@ -26,6 +26,7 @@ from .store import Store
 PREVIEW_STEPS = 600   # queue steps simulated for the preview
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SHOTS = os.path.join(REPO, "data", "screens", "dryrun")
 CONTENT_TYPES = {".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8",
                  ".js": "text/javascript; charset=utf-8", ".svg": "image/svg+xml",
                  ".png": "image/png", ".ico": "image/x-icon"}
@@ -213,21 +214,34 @@ _capture_proc = None
 _capture_lock = threading.Lock()
 
 
-def start_capture(store):
+def _start_game_job(args, what):
+    """Run `python -m village <args>` in the background. Only one job that
+    drives the game at a time (the capture lock enforces it across processes)."""
     from .capture import is_capture_running
     global _capture_proc
     with _capture_lock:
         if (_capture_proc and _capture_proc.poll() is None) or is_capture_running():
-            raise ApiError(409, "a capture is already running")
-        tag = store.settings().get("player_tag", "") or ""
-        cmd = [sys.executable, "-m", "village", "capture"] + (["--tag", tag] if tag else [])
-        log = open(os.path.join(REPO, "data", "web_capture.log"), "a", encoding="utf-8")
-        log.write(f"\n--- {time.strftime('%Y-%m-%d %H:%M:%S')} started from the dashboard\n")
+            raise ApiError(409, "the bot is already using the game (capture or dry run running)")
+        log = open(os.path.join(REPO, "data", "web_jobs.log"), "a", encoding="utf-8")
+        log.write(f"\n--- {time.strftime('%Y-%m-%d %H:%M:%S')} {what} started from the dashboard\n")
         log.flush()
-        _capture_proc = subprocess.Popen(cmd, cwd=REPO, stdout=log, stderr=subprocess.STDOUT,
+        _capture_proc = subprocess.Popen([sys.executable, "-m", "village", *args], cwd=REPO,
+                                         stdout=log, stderr=subprocess.STDOUT,
                                          creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         log.close()  # the child keeps its own handle
     return {"started": True}
+
+
+def start_capture(store):
+    tag = store.settings().get("player_tag", "") or ""
+    return _start_game_job(["capture"] + (["--tag", tag] if tag else []), "capture")
+
+
+def start_dryrun(store):
+    """Dry run of the queue's next step: opens the upgrade dialog, never confirms."""
+    if not store.plan():
+        raise ApiError(409, "the upgrade queue is empty")
+    return _start_game_job(["dryrun", "--queue"], "dry run")
 
 
 def _int_or_none(v, name):
@@ -323,9 +337,20 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, f.read(), CONTENT_TYPES.get(os.path.splitext(path)[1],
                                                          "application/octet-stream"))
 
+    def _shot(self, name):
+        """Dry-run dialog screenshots (data/screens/dryrun/*.png)."""
+        path = os.path.normpath(os.path.join(SHOTS, name))
+        if (not path.startswith(SHOTS + os.sep) or not path.endswith(".png")
+                or not os.path.isfile(path)):
+            return self._send(404, {"error": "not found"})
+        with open(path, "rb") as f:
+            self._send(200, f.read(), "image/png")
+
     def _dispatch(self, method):
         url = urlparse(self.path)
         route = url.path.rstrip("/") or "/"
+        if method == "GET" and route.startswith("/shots/dryrun/"):
+            return self._shot(route[len("/shots/dryrun/"):])
         if method == "GET" and not route.startswith("/api/"):
             return self._static("index.html" if route == "/" else route.lstrip("/"))
         store = Store(self.db_path) if self.db_path else Store()
@@ -363,6 +388,7 @@ class Handler(BaseHTTPRequestHandler):
                     "acked": store.ack(_int_or_none(body.get("id"), "id"))},
                 ("GET", "/api/status"): lambda: self._status(),
                 ("POST", "/api/actions/capture"): lambda: start_capture(store),
+                ("POST", "/api/actions/dryrun"): lambda: start_dryrun(store),
             }
             handler = routes.get((method, route))
             if handler is None:

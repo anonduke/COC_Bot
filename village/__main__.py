@@ -6,6 +6,8 @@
     show [--id N]     summarise the latest (or a given) stored snapshot
     builders          builder forecast from the latest snapshot
     verify [--hours]  check forecasts and builder counters across stored snapshots
+    dryrun            find an upgrade in the Builder menu, open its dialog,
+                      close it again (never confirms): --queue or --name/--from
     web               dashboard on http://<this PC>:8765/ (LAN)
 """
 import argparse
@@ -198,6 +200,62 @@ def cmd_verify(args):
     return 0 if not bad and not mismatched else 1
 
 
+def next_queue_step(store, gd):
+    """(name, from_level, item) of the first step the queue would start, from
+    the same preview the dashboard shows; None if the queue has nothing to do."""
+    from .catalog import preview
+    stored = store.latest()
+    if stored is None or gd is None:
+        return None
+    f = forecast(stored.snapshot, gd, stored.counter)
+    planned, _ = preview(stored.snapshot, gd, store.plan(), f, time.time(), 50)
+    if not planned:
+        return None
+    p = min(planned, key=lambda p: p.start)
+    return gd.name(p.step.data), p.step.from_level, p
+
+
+def cmd_dryrun(args):
+    from . import adb
+    from .capture import CaptureError
+    from .upgrader import UpgradeError, dry_run
+    store = Store()
+    if args.queue:
+        stored = store.latest()
+        gd = _load_gamedata(stored.game_version if stored else None)
+        nxt = next_queue_step(store, gd)
+        if nxt is None:
+            print("the queue has nothing to do")
+            return 1
+        name, from_level, p = nxt
+        print(f"next queue step: {name} {from_level} -> {from_level + 1} "
+              f"(planned start {_clock(p.start)})")
+    else:
+        if not (args.name and args.from_level):
+            print("use --queue, or --name NAME --from LEVEL")
+            return 2
+        name, from_level = args.name, args.from_level
+    with keep_display_on():
+        try:
+            r = dry_run(name, from_level, log=lambda m: print(m, flush=True))
+        except (CaptureError, UpgradeError, adb.AdbError, OSError) as e:
+            print(f"dry run failed: {e}")
+            store.notify("error", "upgrade", f"Dry run for {name} failed", str(e))
+            return 1
+    print(f"{'FOUND' if r.found else 'NOT FOUND'}: {r.reason}")
+    for row, title in r.rows_opened:
+        print(f"  opened {row!r}: {title!r}")
+    for p in r.screenshots:
+        print(f"  screenshot {p}")
+    store.notify("info" if r.found and r.affordable else "warning", "upgrade",
+                 f"Dry run: {name} {from_level} -> {from_level + 1} "
+                 + ("found, not confirmed" if r.found else "not found")
+                 + (" (not enough resources)" if r.found and not r.affordable else ""),
+                 r.reason + "".join(f"\n{row} -> {title}" for row, title in r.rows_opened)
+                 + "".join(f"\n{p}" for p in r.screenshots))
+    return 0 if r.found else 1
+
+
 def cmd_web(args):
     from .web import serve
     httpd = serve(args.host, args.port)
@@ -230,6 +288,11 @@ def main(argv=None):
     v.add_argument("--hours", type=float, help="only snapshots from the last N hours")
     v.add_argument("--tolerance", type=float, default=120, help="seconds")
     v.set_defaults(func=cmd_verify)
+    d = sub.add_parser("dryrun", help="open an upgrade dialog and close it; never confirms")
+    d.add_argument("--queue", action="store_true", help="the next step of the upgrade queue")
+    d.add_argument("--name", help='building/hero name as in game, e.g. "Wizard Tower"')
+    d.add_argument("--from", dest="from_level", type=int, help="current level of that copy")
+    d.set_defaults(func=cmd_dryrun)
     w = sub.add_parser("web")
     w.add_argument("--host", default="0.0.0.0", help="0.0.0.0 = reachable from the LAN")
     w.add_argument("--port", type=int, default=8765)

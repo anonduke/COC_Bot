@@ -70,6 +70,16 @@ class BasicWebTest(WebTest):
                 self.get(path)
             self.assertEqual(ctx.exception.code, 404)
 
+    def test_screenshot_route_is_confined(self):
+        for path in ("/shots/dryrun/../../village.db", "/shots/dryrun/nope.png",
+                     "/shots/dryrun/x.txt"):
+            with self.subTest(path=path), self.assertRaises(urllib.error.HTTPError) as ctx:
+                self.get(path)
+            self.assertEqual(ctx.exception.code, 404)
+
+    def test_dryrun_needs_a_queue(self):
+        self.assertEqual(self.api("/api/actions/dryrun", {})[0], 409)
+
     def test_state(self):
         status, st = self.api("/api/state")
         self.assertEqual(status, 200)

@@ -6,7 +6,7 @@ import numpy as np
 
 from tests.helpers import FIXTURES
 from village.home import is_home
-from village.resources import read_builder_counter, read_resources
+from village.resources import BUILDER_COUNTER, REGIONS, read_builder_counter, read_resources
 from village.store import Resources
 
 # Crops of live 1600x900 home screenshots (2026-11-14), pasted back at their
@@ -35,6 +35,15 @@ class ResourcesTest(unittest.TestCase):
 
     def test_blank_screen_reads_nothing(self):
         self.assertEqual(read_resources(np.zeros((900, 1600, 3), np.uint8)), Resources())
+
+    def test_thin_specks_do_not_crash(self):
+        # wall's digit splitter crashes on 1 px tall, wide blobs; the readers
+        # must report "not readable" instead.
+        img = np.zeros((900, 1600, 3), np.uint8)
+        for x, y, w, h in (*REGIONS.values(), BUILDER_COUNTER):
+            img[y + h // 2, x + 5:x + 14] = 255
+        self.assertEqual(read_resources(img), Resources())
+        self.assertIsNone(read_builder_counter(img))
 
 
 class BuilderCounterTest(unittest.TestCase):

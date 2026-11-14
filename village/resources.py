@@ -38,7 +38,12 @@ def read_value(img_bgr, name):
     x, y, w, h = REGIONS[name]
     crop = cv2.cvtColor(img_bgr[y:y + h, x:x + w], cv2.COLOR_BGR2RGB)
     wall = _wall()
-    digits = wall._classify_digit_mask(wall._storage_mask(crop))
+    try:
+        digits = wall._classify_digit_mask(wall._storage_mask(crop))
+    except cv2.error:
+        # wall's splitter can produce an empty slice on thin, wide specks
+        # (e.g. a loading screen); that is "not readable", not a crash.
+        return None
     if not digits or len(digits) > MAX_DIGITS[name]:
         return None
     return int(digits)
@@ -67,7 +72,10 @@ def read_builder_counter(img_bgr):
         return None
     digits = []
     for i in (blobs[0], blobs[2]):
-        d = wall._classify_digit_mask(np.where(labels == i, 255, 0).astype(np.uint8))
+        try:
+            d = wall._classify_digit_mask(np.where(labels == i, 255, 0).astype(np.uint8))
+        except cv2.error:   # see read_value
+            return None
         if len(d) != 1:
             return None
         digits.append(int(d))

@@ -437,10 +437,22 @@ const SEV = {
   warning: '<svg viewBox="0 0 24 24" fill="none" stroke="var(--warning)" stroke-width="2.2"><path d="M12 3l10 18H2z"/><path d="M12 10v5M12 18v.5"/></svg>',
   info: '<svg viewBox="0 0 24 24" fill="none" stroke="var(--series-1)" stroke-width="2.2"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5v.5"/></svg>',
 };
+// Dry-run notes list screenshot paths (…\screens\dryrun\<file>.png); show
+// them as thumbnails that open full size.
+const SHOT_PATH = /[A-Za-z]:\\[^\n]*?\\screens\\dryrun\\([\w.-]+\.png)/g;
+function detailHTML(detail) {
+  const shots = [];
+  const text = String(detail).replace(SHOT_PATH, (_, f) => { shots.push(f); return `[screenshot ${shots.length}]`; });
+  const thumbs = shots.map(f => {
+    const url = "/shots/dryrun/" + encodeURIComponent(f);
+    return `<a href="${url}" target="_blank" rel="noopener"><img src="${url}" alt="dialog screenshot" loading="lazy"></a>`;
+  }).join("");
+  return `<div class="detail">${esc(text)}</div>` + (thumbs ? `<div class="shots">${thumbs}</div>` : "");
+}
 function noteHTML(n, compactView) {
   return `<div class="note ${n.severity} ${n.acked_at ? "read" : ""}">${SEV[n.severity] || SEV.info}
     <div><div><span class="sev ${n.severity}">${n.severity}</span> <span class="muted">· ${esc(n.source)}</span></div>
-      <div class="msg">${esc(n.message)}</div>${n.detail && !compactView ? `<div class="detail">${esc(n.detail)}</div>` : ""}</div>
+      <div class="msg">${esc(n.message)}</div>${n.detail && !compactView ? detailHTML(n.detail) : ""}</div>
     <div style="text-align:right"><div class="when">${ago(n.created_at)}</div>
       ${!n.acked_at && !compactView ? `<button class="btn small ghost" data-ack="${n.id}">Mark read</button>` : ""}</div></div>`;
 }
@@ -661,6 +673,15 @@ $("#settings").addEventListener("click", async e => {
   if (!Object.keys(body).length) { toast("Nothing changed"); return; }
   try { await api("/api/settings", body); toast("Settings saved"); loadSettings(); }
   catch (err) { toast(err.message, "error"); }
+});
+
+$("#btn-dryrun").addEventListener("click", async () => {
+  try {
+    await api("/api/actions/dryrun", {});
+    toast("Dry run started: it opens the upgrade dialog, reads it and closes it (never confirms). The result appears under Alerts in a few minutes.");
+    S.status = { ...(S.status || {}), capture_running: true };
+    renderStatus();
+  } catch (e) { toast(e.message, "error"); }
 });
 
 // ---------- builder table toggle ----------
