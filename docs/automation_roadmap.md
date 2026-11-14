@@ -37,7 +37,7 @@ Date: 2026-11-13. Machine tested: DESKTOP-GSD3MHF, LDPlayer 9.1.67, TH18 account
   - Reboots with the display still off came back to LDPlayer's boot screen frozen at "94%", even though adb showed Android fully booted with Clash in front. Forcing the display on (`SetThreadExecutionState(ES_DISPLAY_REQUIRED)` plus one key press) made the real picture appear immediately.
   - This would also explain why the attack loop has been stable: its clicks count as input and keep the display awake. Idle time between sessions does not.
   - **Fix:** the bot process holds `ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED` for as long as it runs (no system setting change needed). Alternatively, set the display timeout to "never" in Windows power options.
-- **System UI hang on boot** (every boot today). **Fix without any screen taps:** `adb shell "su 0 kill -9 <pid of com.android.systemui>"`. System UI restarts in seconds. Detection, also without screen reading: `dumpsys window | grep mCurrentFocus` contains `Application Not Responding: com.android.systemui`. It may be a symptom of the display being off (above); the second idle test will tell.
+- **System UI hang on boot** (every boot today). Detection without screen reading: `dumpsys window | grep mCurrentFocus` contains `Application Not Responding: com.android.systemui`. My first fix was `adb shell "su 0 kill -9 <pid of com.android.systemui>"`. **Later in Phase 2 this turned out to keep the problem going**: press Wait instead (see Phase 2 progress).
 - **Frozen-picture detection.** adb alone can't see this failure: Clash can be focused and running while the picture is frozen. Compare two window captures a few seconds apart; the village always animates, so zero changed pixels means frozen.
 - **Boot timing:** `ldconsole launch` → `sys.boot_completed=1` in about 59 s. Launching via `adb shell monkey -p com.supercell.clashofclans -c android.intent.category.LAUNCHER 1` gives `GameApp` focus within 5 s.
 - **LDPlayer ad windows** are top-level Win32 windows owned by `dnplayer.exe`. Seen so far: classes `adframe` (side panel) and `ADFullScreenFrame` (full-screen promo). Both hide with `ShowWindow(hwnd, SW_HIDE)`. The in-game "Top-Up" ad is drawn inside the emulator and is closed with the existing `misc/ld_ad_close.png`.
@@ -239,6 +239,8 @@ Each phase ends with written test results and an acceptance sign-off from you.
   - Record a screenshot corpus of every popup seen so far.
 - **Acceptance:** 2 h idle on the home screen without an ANR, or ANR frequency measured and logged.
 - **Result (run 1, display allowed to turn off):** failed at 80 min with a full graphics hang; cause found (see Phase 0 findings). Run 2 holds the display on.
+- **Result (run 2, display held on, 2026-11-14 11:35–13:35):** no graphics hang in 120 min; the game kept rendering throughout. The System UI dialog appeared after 3 min and stayed until cleared; the game kept running behind it.
+- **Signed off 2026-11-14** on these terms: the full hang is prevented by keeping the display awake; the System UI dialog is handled by detection + automatic handling, not cured (handling changed to "press Wait" in Phase 2).
 
 ### Phase 1: Analysis (this document)
 - **Acceptance:** you approve the architecture and phase order.
@@ -257,6 +259,32 @@ Each phase ends with written test results and an acceptance sign-off from you.
   - Every ID maps to a name.
   - Capture is 20/20.
   - The resource OCR error rate is 0 on the test corpus.
+
+#### Phase 2 results so far (2026-11-14)
+- Every ID maps to a name: **yes**, except decorations (cosmetic, no table).
+- Live capture: **20/20** (41–52 s each), after switching the System UI handling to "Wait". The first run of 20 (still restarting System UI) was 19/20.
+- Resource OCR: **20/20** home screenshots read correctly (gold, elixir, dark elixir, gems), and dimmed screens read as unknown. *Open:* all 20 had the same values; the corpus needs varied numbers, which farming sessions will provide.
+
+#### Phase 2 progress (2026-11-14)
+Code: `village/` package, tests in `tests/` (`python -m unittest discover -s tests -t .`). Commands: `python -m village static | capture [--repeat N] | show`.
+- **Static data** (`village/gamedata.py`): decoded from the installed APK into `data/static/<game version>/` (not committed). Export IDs are the `GlobalID` column where a table has one (buildings, characters, spells, traps: *not* in row order), otherwise class × 1,000,000 + named-row index. English names come from `localization/texts.csv` + `texts_patch.csv`. **Every ID in the live export resolves** except decorations (no table in this asset pack; cosmetic).
+- **Export parser** (`village/export.py`): entries, job queues (builder, lab, pet house, Builder Base), helper cooldowns, Crafting Station modules. The fixture export gives 7 builder jobs = the in-game 0/7.
+- **Diff** (`village/diff.py`): started / finished / leveled (instant, e.g. walls) / unexplained.
+- **Store** (`village/store.py`): SQLite WAL, `snapshots` table with OCR resources, schema versioning.
+- **Capture** (`village/capture.py`): runs entirely through adb, so the LDPlayer window may be covered and the mouse is never used.
+  - `adb exec-out screencap` works once the display is kept awake. Raw format takes ~1 s; PNG takes ~10 s on this emulator.
+  - The game ignores fast swipes; slow 800 ms drags scroll ~400 px each, and each `input` call costs ~3 s. The list needs 8 drags; they run in one adb call, then the row position is checked.
+  - Taps only Copy and Close, each placed relative to a template match that must be at its expected position.
+  - Your clipboard is saved first and restored after.
+  - One capture takes about 50 s.
+- **Resources** (`village/resources.py`): gold, elixir, **dark elixir and gems** read from the adb screenshot with `wall.py`'s digit matcher. A screen dimmed by a popup reads as "unknown", never as a number.
+- **System UI dialog: press Wait, never restart System UI.**
+  - The logged reason is a 10 s timeout on the per-minute clock broadcast.
+  - The ANR traces show a *freshly started* System UI stuck in its start-up, waiting on `system_server`. There, LDPlayer's own code (`LdUtils.get_config_value`, called from `PackageManagerService.checkUidPermission`) holds a lock and parses a config string on every permission check.
+  - So each restart (our adb kill, or "Close app") produces a new slow start-up, which misses the next clock tick and stalls again. During the first 20-capture run, which killed System UI at every start, it stalled **every minute**.
+  - Pressing **Wait** instead let the same System UI process finish starting: no new stall in the following 4 minutes.
+  - `village.adb.dismiss_systemui_anr` presses Wait, guarded by a template of the dialog. The capture calls it whenever the expected screen is not found.
+  - I briefly set `hide_error_dialogs=1` (it makes Android kill instead of asking) and reverted it the same day, because it would automate the restart loop.
 
 ### Phase 3: Builder tracker
 - **Objectives:** current jobs, free times and builder count from the snapshot; next-free forecast.

@@ -12,3 +12,7 @@ logs/
 *.log
 
 
+
+# Generated: decoded game tables (Supercell data, regenerate with
+# `python -m village static`) and the local database.
+data/
