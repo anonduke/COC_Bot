@@ -195,17 +195,49 @@ def run(run_id):
             R.CONFIG["ranked_mode"] = p["ranked"]
             R.CONFIG["event_troops"] = p["event_troops"]
             R.cleanup_session()
+            # Keep this run's evidence: Ranked_Copy's log and, for every failed
+            # attack, a screenshot plus the window that had the foreground.
+            import logging
+            import pyautogui
+            run_dir = os.path.join(repo, "data", "farm_runs", f"run_{run_id}")
+            os.makedirs(run_dir, exist_ok=True)
+            fh = logging.FileHandler(os.path.join(run_dir, "bot.log"), encoding="utf-8")
+            fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(funcName)s - %(message)s"))
+            logging.getLogger().addHandler(fh)
+            logging.getLogger().setLevel(logging.DEBUG)
             monitor_stop = threading.Event()
             threading.Thread(target=R._bot_monitor, args=(monitor_stop,), daemon=True).start()
             R.activate_game_window()
             report(message="farming")
 
+            def evidence(tag):
+                try:
+                    import ctypes
+                    u = ctypes.windll.user32
+                    buf = ctypes.create_unicode_buffer(256)
+                    u.GetWindowTextW(u.GetForegroundWindow(), buf, 256)
+                    name = time.strftime("%H%M%S") + f"_{tag}.png"
+                    pyautogui.screenshot(os.path.join(run_dir, name))
+                    logging.warning(f"[FARM] {tag}: foreground window {buf.value!r}, saved {name}")
+                    return buf.value
+                except Exception as e:  # noqa: BLE001 - evidence must never break the run
+                    logging.warning(f"[FARM] could not save evidence: {e}")
+                    return "?"
+
             def attack():
                 R._update_heartbeat()
-                ok = R.attack()
+                try:
+                    ok = R.attack()
+                except Exception:
+                    logging.error(traceback.format_exc())
+                    evidence("exception")
+                    raise
                 R._update_heartbeat()
                 if ok:
                     R.attack_count += 1
+                else:
+                    fg = evidence("failed")
+                    report(message=f"attack failed (foreground window: {fg!r}); see {run_dir}")
                 return ok
 
             def walls():
@@ -216,8 +248,12 @@ def run(run_id):
             try:
                 status, message = run_loop(p, attack, _state_from_screen, stop_requested,
                                            report, walls if p["walls"] else None)
+                if status == "failed":
+                    message += f"; screenshots and log in {run_dir}"
             finally:
                 monitor_stop.set()
+                logging.getLogger().removeHandler(fh)
+                fh.close()
     except CaptureError as e:
         status, message = "failed", f"could not start: {e}"
     except Exception as e:  # noqa: BLE001
