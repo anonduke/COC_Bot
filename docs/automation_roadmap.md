@@ -384,6 +384,19 @@ Code: `village/` package, tests in `tests/` (`python -m unittest discover -s tes
   - Budget exhaustion → the session ends cleanly and is retried later.
 - **Acceptance:** targets met without over-farming beyond one attack; no change to `attack()` behaviour.
 
+#### Early piece, at your request (2026-11-14): farming from the dashboard
+- **Where:** the dashboard's **Attack** page (`village/farm.py`). It runs the existing `Ranked_Copy.attack()` unchanged.
+- **Goals:**
+  - until storages are full (gold, elixir, both or either; read from the bar fill);
+  - N attacks;
+  - until gold/elixir/dark elixir reach set amounts.
+- **Always-on limits:** max attacks, max minutes, and 6 failed attacks in a row. Options: ranked, event troops, walls every N attacks.
+- **Stop:** honoured between attacks, never mid-battle.
+- **Visibility:** progress per attack (resources, bar fill, gains) and a run history; the result also goes to Alerts.
+- **Game lock:** a run holds the capture lock, so captures and dry runs wait.
+- **Dead runs:** a run with no progress for 20 min is marked failed.
+- **Limitation:** `Ranked_Copy` uses the real mouse on the LDPlayer window, so the window must be visible and the PC unused while farming.
+
 ### Phase 8: Scheduler and orchestrator
 - **Objectives:**
   - the full loop: IDLE → event → session → IDLE;

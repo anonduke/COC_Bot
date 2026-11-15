@@ -53,6 +53,45 @@ def read_resources(img_bgr):
     return Resources(**{name: read_value(img_bgr, name) for name in REGIONS})
 
 
+# Storage bars fill from the right (the icon end) towards the left. Live
+# calibration: 20 385 195 gold filled 0.78 and 9 975 078 elixir 0.38 of the
+# bar, both giving ~26 M capacity, so the full bar runs x 1252..1536.
+BAR_X = (1252, 1536)
+BAR_ROWS = {"gold": 64, "elixir": 124, "dark_elixir": 188}   # rows below the digits
+FULL_AT = 0.985
+
+
+def _bar_colour(name, hsv_px):
+    h, s, v = (int(c) for c in hsv_px)
+    if name == "gold":
+        return 15 <= h <= 35 and s >= 150 and v >= 150
+    if name == "elixir":
+        return 135 <= h <= 165 and s >= 120 and v >= 120
+    return 125 <= h <= 160 and s >= 120 and 30 <= v <= 110      # dark elixir: deep purple
+
+
+def bar_fill(img_bgr, name):
+    """Fraction of a storage bar that is filled (0..1). Walks left from the
+    icon end while the pixels have the bar's colour; small gaps (sparkles,
+    the digits' outline) up to 4 px are tolerated."""
+    x0, x1 = BAR_X
+    row = cv2.cvtColor(img_bgr[BAR_ROWS[name]:BAR_ROWS[name] + 1, x0:x1 + 1],
+                       cv2.COLOR_BGR2HSV)[0]
+    edge, miss = len(row), 0
+    for i in range(len(row) - 1, -1, -1):
+        if _bar_colour(name, row[i]):
+            edge, miss = i, 0
+        else:
+            miss += 1
+            if miss > 4:
+                break
+    return round((len(row) - edge) / len(row), 3)
+
+
+def storages_full(img_bgr, which=("gold", "elixir")):
+    return all(bar_fill(img_bgr, n) >= FULL_AT for n in which)
+
+
 # The home-village builder counter "free/total" above the Build button.
 BUILDER_COUNTER = (1415, 672, 80, 44)
 

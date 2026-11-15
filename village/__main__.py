@@ -256,6 +256,11 @@ def cmd_dryrun(args):
     return 0 if r.found else 1
 
 
+def cmd_farm(args):
+    from .farm import run
+    return run(args.run_id)
+
+
 def cmd_web(args):
     from .web import serve
     httpd = serve(args.host, args.port)
@@ -293,6 +298,9 @@ def main(argv=None):
     d.add_argument("--name", help='building/hero name as in game, e.g. "Wizard Tower"')
     d.add_argument("--from", dest="from_level", type=int, help="current level of that copy")
     d.set_defaults(func=cmd_dryrun)
+    fm = sub.add_parser("farm", help="run a farming job queued from the dashboard")
+    fm.add_argument("--run-id", type=int, required=True)
+    fm.set_defaults(func=cmd_farm)
     w = sub.add_parser("web")
     w.add_argument("--host", default="0.0.0.0", help="0.0.0.0 = reachable from the LAN")
     w.add_argument("--port", type=int, default=8765)

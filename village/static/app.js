@@ -78,7 +78,7 @@ const hideTip = () => tip.classList.add("hidden");
 document.addEventListener("scroll", hideTip, true);
 
 // ---------- navigation ----------
-const TITLES = { dashboard: "Dashboard", queue: "Builder queue", settings: "Settings", notifications: "Alerts" };
+const TITLES = { dashboard: "Dashboard", queue: "Builder queue", attack: "Attack", settings: "Settings", notifications: "Alerts" };
 function go(page) {
   if (!TITLES[page]) page = "dashboard";
   S.page = page;
@@ -87,6 +87,7 @@ function go(page) {
   $("#page-title").textContent = TITLES[page];
   if (location.hash.slice(1) !== page) history.replaceState(null, "", "#" + page);
   if (page === "queue") loadQueue();
+  if (page === "attack") loadFarm();
   if (page === "settings") loadSettings();
   if (page === "notifications") loadNotes();
 }
@@ -414,6 +415,7 @@ function renderDashboard() {
 // ---------- per-second updates ----------
 function tick() {
   const t = now();
+  $$("[data-countdown-up]").forEach(el => { el.textContent = dur(t - +el.dataset.countdownUp); });
   $$("[data-countdown]").forEach(el => {
     const end = +el.dataset.countdown;
     el.textContent = end > t ? dur(end - t, end - t < 3600) : "done";
@@ -684,6 +686,110 @@ $("#btn-dryrun").addEventListener("click", async () => {
   } catch (e) { toast(e.message, "error"); }
 });
 
+// ---------- attack / farming ----------
+$("#farm-modes").addEventListener("change", e => {
+  if (!e.target.matches("input[type=radio]")) return;
+  $$("#farm-modes .mode").forEach(m => m.classList.toggle("active", m.contains(e.target)));
+});
+function farmGoalText(p) {
+  if (!p) return "";
+  if (p.mode === "attacks") return `${p.attacks} attacks`;
+  if (p.mode === "full") return { both: "gold and elixir full", gold: "gold full", elixir: "elixir full", any: "gold or elixir full" }[p.full];
+  return "reach " + [["gold", "gold"], ["elixir", "elixir"], ["dark_elixir", "dark elixir"]]
+    .filter(([k]) => p[k]).map(([k, label]) => `${compact(p[k])} ${label}`).join(", ");
+}
+function farmProgress(r) {
+  const p = r.params, s = r.state || {};
+  if (p.mode === "attacks") return Math.min(1, r.attacks / p.attacks);
+  if (p.mode === "full") {
+    const g = s.gold_fill ?? 0, e = s.elixir_fill ?? 0;
+    return p.full === "gold" ? g : p.full === "elixir" ? e : p.full === "any" ? Math.max(g, e) : Math.min(g, e);
+  }
+  const parts = [["gold", "gold"], ["elixir", "elixir"], ["dark_elixir", "dark_elixir"]]
+    .filter(([k]) => p[k]).map(([k]) => Math.min(1, (s[k] ?? 0) / p[k]));
+  return parts.length ? Math.min(...parts) : 0;
+}
+function gained(r, key) {
+  const a = r.start_state?.[key], b = r.state?.[key];
+  return a == null || b == null ? null : b - a;
+}
+function fillRow(label, cls, fill, value, gain) {
+  const pct = fill == null ? null : Math.round(fill * 100);
+  return `<div class="fill-row"><span>${label}</span>
+    <div class="bar"><i class="${cls}" style="width:${pct ?? 0}%"></i></div>
+    <span class="num" style="text-align:right">${value == null ? "–" : compact(value)}${pct == null ? "" : ` · ${pct}%`}
+      ${gain ? `<div class="muted" style="font-size:12px">${gain > 0 ? "+" : ""}${compact(gain)}</div>` : ""}</span></div>`;
+}
+function renderFarm() {
+  const f = S.farm; if (!f) return;
+  const r = f.current;
+  const pill = $("#pill-farm");
+  pill.classList.toggle("hidden", !r);
+  if (r) pill.querySelector("span:last-child").textContent =
+    r.stop_requested ? "Stopping…" : `Farming · ${r.attacks} attack${r.attacks === 1 ? "" : "s"}`;
+  $("#farm-start").disabled = !!r;
+  $("#farm-actions").innerHTML = r && !r.stop_requested
+    ? `<button class="btn small" id="farm-stop" title="Stops after the current attack">Stop after this attack</button>` : "";
+  const last = f.runs.find(x => x !== r);
+  if (!r) {
+    $("#farm-current").innerHTML = `<div class="empty">No farming run active.${last ? ` Last run: <b>${esc(last.status)}</b>, ${esc(last.message)}.` : ""}</div>`;
+  } else {
+    const st = r.stop_requested ? "stopping" : r.status;
+    const s = r.state || {};
+    const started = r.started_at || r.created_at;
+    const prog = farmProgress(r);
+    $("#farm-current").innerHTML = `
+      <div class="farm-head"><span class="status-chip ${st}">${st}</span><span class="farm-goal">Goal: ${esc(farmGoalText(r.params))}</span></div>
+      <div class="farm-big num">${Math.round(prog * 100)}%</div>
+      <div class="bar" style="height:10px;margin-top:6px"><i style="width:${(prog * 100).toFixed(1)}%"></i></div>
+      <div class="farm-stats">
+        <div><b class="num">${r.attacks}</b><span>attacks</span></div>
+        <div><b class="num">${r.fails}</b><span>failed</span></div>
+        <div><b class="num">${r.walls}</b><span>walls</span></div>
+        <div><b class="num" data-countdown-up="${started}">${dur(now() - started)}</b><span>elapsed</span></div>
+      </div>
+      ${fillRow("Gold", "gold", s.gold_fill, s.gold, gained(r, "gold"))}
+      ${fillRow("Elixir", "elixir", s.elixir_fill, s.elixir, gained(r, "elixir"))}
+      ${fillRow("Dark elixir", "dark", s.dark_fill, s.dark_elixir, gained(r, "dark_elixir"))}
+      <div class="muted" style="margin-top:8px;font-size:12.5px">${esc(r.message)} · limits ${r.params.max_attacks} attacks / ${r.params.max_minutes} min</div>`;
+  }
+  $("#farm-history").innerHTML = f.runs.length ? `<table class="data"><thead><tr><th>Started</th><th>Goal</th><th>Result</th>
+      <th class="num">Attacks</th><th class="num">Gold</th><th class="num">Elixir</th><th class="num">Dark</th><th class="num">Time</th></tr></thead><tbody>${
+    f.runs.map(x => {
+      const t0 = x.started_at || x.created_at, t1 = x.ended_at || now();
+      const g = k => { const v = gained(x, k); return v == null ? "–" : (v > 0 ? "+" : "") + compact(v); };
+      return `<tr><td>${clock(t0)}</td><td>${esc(farmGoalText(x.params))}</td>
+        <td><span class="status-chip ${x.status}">${x.status}</span> <span class="muted">${esc(x.message)}</span></td>
+        <td class="num">${x.attacks}${x.fails ? ` <span class="muted">(+${x.fails} failed)</span>` : ""}</td>
+        <td class="num">${g("gold")}</td><td class="num">${g("elixir")}</td><td class="num">${g("dark_elixir")}</td>
+        <td class="num">${dur(t1 - t0)}</td></tr>`;
+    }).join("")}</tbody></table>` : `<div class="empty">No runs yet.</div>`;
+}
+async function loadFarm() {
+  try { S.farm = await api("/api/farm"); renderFarm(); } catch { /* keep */ }
+}
+$("#farm-start").addEventListener("click", async () => {
+  const mode = $("#farm-modes input[name=mode]:checked").value;
+  const num = id => $(id).value === "" ? null : Number($(id).value);
+  const body = {
+    mode, full: $("#f-full").value, attacks: num("#f-attacks"),
+    gold: num("#f-gold"), elixir: num("#f-elixir"), dark_elixir: num("#f-dark"),
+    ranked: $("#f-ranked").checked, event_troops: $("#f-event").checked,
+    walls: $("#f-walls").checked, wall_every: num("#f-wall-every"),
+    max_attacks: num("#f-max-attacks"), max_minutes: num("#f-max-minutes"),
+  };
+  try {
+    await api("/api/farm/start", body);
+    toast("Farming started. Progress updates here after every attack.");
+    loadFarm(); loadStatus();
+  } catch (e) { toast(e.message, "error"); }
+});
+$("#farm-actions").addEventListener("click", async e => {
+  if (!e.target.closest("#farm-stop")) return;
+  try { await api("/api/farm/stop", {}); toast("Stopping after the current attack."); loadFarm(); }
+  catch (err) { toast(err.message, "error"); }
+});
+
 // ---------- builder table toggle ----------
 $("#toggle-builder-table").addEventListener("click", e => {
   const tbl = $("#builder-table"), lanes = $("#builder-lanes");
@@ -703,4 +809,6 @@ addEventListener("hashchange", () => go(location.hash.slice(1)));
   setInterval(loadNotesCount, 30000);
   setInterval(loadHistory, 300000);
   setInterval(() => { if (S.page === "queue") loadQueue(); }, 60000);
+  loadFarm();
+  setInterval(() => loadFarm(), 5000);   // cheap; keeps the "Farming" pill live on every page
 })();

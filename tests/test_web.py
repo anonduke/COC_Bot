@@ -80,6 +80,32 @@ class BasicWebTest(WebTest):
     def test_dryrun_needs_a_queue(self):
         self.assertEqual(self.api("/api/actions/dryrun", {})[0], 409)
 
+    def test_farm_validation_and_stop(self):
+        self.assertEqual(self.api("/api/farm")[0], 200)
+        self.assertEqual(self.api("/api/farm/start", {"mode": "nuke"})[0], 400)
+        self.assertEqual(self.api("/api/farm/start", {"mode": "target"})[0], 400)
+        self.assertEqual(self.api("/api/farm/stop", {})[0], 409)
+
+    def test_farm_start_refused_while_game_busy(self):
+        # Holding the capture lock = another job drives the game. The start is
+        # refused and the queued run is closed, never left "queued".
+        from village.capture import capture_lock
+        with capture_lock():
+            status, body = self.api("/api/farm/start", {"mode": "attacks", "attacks": 1})
+        self.assertEqual(status, 409)
+        _, farm = self.api("/api/farm")
+        self.assertIsNone(farm["current"])
+        self.assertEqual(farm["runs"][0]["status"], "failed")
+
+    def test_stale_farm_run_is_closed(self):
+        s = Store(self.db)
+        rid = s.create_farm_run({"mode": "attacks", "attacks": 1})
+        s.update_farm_run(rid, status="running", heartbeat_at=1)
+        s.close()
+        _, farm = self.api("/api/farm")
+        self.assertIsNone(farm["current"])
+        self.assertEqual(next(r for r in farm["runs"] if r["id"] == rid)["status"], "failed")
+
     def test_state(self):
         status, st = self.api("/api/state")
         self.assertEqual(status, 200)

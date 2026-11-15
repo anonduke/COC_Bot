@@ -244,6 +244,51 @@ def start_dryrun(store):
     return _start_game_job(["dryrun", "--queue"], "dry run")
 
 
+FARM_STALE = 20 * 60   # a running farm with no progress for this long is dead
+
+
+def farm_payload(store):
+    runs = store.farm_runs(10)
+    now = time.time()
+    for r in runs:
+        if r["status"] in ("queued", "running"):
+            last = r["heartbeat_at"] or r["created_at"]
+            if now - last > FARM_STALE:
+                store.update_farm_run(r["id"], status="failed", ended_at=int(now),
+                                      message=f"no progress for {FARM_STALE // 60} min "
+                                              "(the farming process stopped)")
+                r.update(status="failed", ended_at=int(now))
+    current = next((r for r in runs if r["status"] in ("queued", "running")), None)
+    return {"current": current, "runs": runs, "now": now}
+
+
+def farm_start(store, body):
+    from .farm import validate as validate_farm
+    try:
+        params = validate_farm(body)
+    except ValueError as e:
+        raise ApiError(400, str(e)) from None
+    if farm_payload(store)["current"]:
+        raise ApiError(409, "a farming run is already active")
+    run_id = store.create_farm_run(params)
+    try:
+        _start_game_job(["farm", "--run-id", str(run_id)], f"farming run {run_id}")
+    except ApiError:
+        store.update_farm_run(run_id, status="failed", ended_at=int(time.time()),
+                              message="not started: the bot was busy with the game")
+        raise
+    return {"id": run_id}
+
+
+def farm_stop(store):
+    current = farm_payload(store)["current"]
+    if not current:
+        raise ApiError(409, "no farming run is active")
+    store.update_farm_run(current["id"], stop_requested=1,
+                          message="stop requested: finishing the current attack")
+    return {"ok": True}
+
+
 def _int_or_none(v, name):
     if v is None or v == "":
         return None
@@ -389,6 +434,9 @@ class Handler(BaseHTTPRequestHandler):
                 ("GET", "/api/status"): lambda: self._status(),
                 ("POST", "/api/actions/capture"): lambda: start_capture(store),
                 ("POST", "/api/actions/dryrun"): lambda: start_dryrun(store),
+                ("GET", "/api/farm"): lambda: farm_payload(store),
+                ("POST", "/api/farm/start"): lambda: farm_start(store, body),
+                ("POST", "/api/farm/stop"): lambda: farm_stop(store),
             }
             handler = routes.get((method, route))
             if handler is None:

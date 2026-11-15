@@ -65,6 +65,26 @@ _MIGRATIONS = [
     );
     CREATE INDEX notifications_open ON notifications (acked_at, created_at);
     """,
+    # v4: farming runs started from the dashboard
+    """
+    CREATE TABLE farm_runs (
+        id             INTEGER PRIMARY KEY,
+        created_at     INTEGER NOT NULL,
+        started_at     INTEGER,
+        ended_at       INTEGER,
+        heartbeat_at   INTEGER,
+        status         TEXT NOT NULL,      -- queued, running, done, stopped, failed
+        params         TEXT NOT NULL,      -- JSON
+        attacks        INTEGER NOT NULL DEFAULT 0,
+        fails          INTEGER NOT NULL DEFAULT 0,
+        walls          INTEGER NOT NULL DEFAULT 0,
+        message        TEXT NOT NULL DEFAULT '',
+        start_state    TEXT,               -- JSON: resources + bar fills at the start
+        state          TEXT,               -- JSON: latest resources + bar fills
+        stop_requested INTEGER NOT NULL DEFAULT 0,
+        pid            INTEGER
+    );
+    """,
 ]
 SEVERITIES = ("info", "warning", "error")
 
@@ -242,6 +262,45 @@ class Store:
             sql += " WHERE acked_at IS NULL"
         sql += " ORDER BY created_at DESC, id DESC LIMIT ?"
         return [dict(r) for r in self.db.execute(sql, (limit,))]
+
+    # --- farming runs -----------------------------------------------------
+    _FARM_FIELDS = {"started_at", "ended_at", "heartbeat_at", "status", "attacks", "fails",
+                    "walls", "message", "start_state", "state", "stop_requested", "pid"}
+
+    def create_farm_run(self, params):
+        with self.db:
+            return self.db.execute(
+                "INSERT INTO farm_runs (created_at, status, params) VALUES (?, 'queued', ?)",
+                (int(time.time()), json.dumps(params))).lastrowid
+
+    def update_farm_run(self, run_id, **fields):
+        bad = set(fields) - self._FARM_FIELDS
+        if bad:
+            raise ValueError(f"cannot change {sorted(bad)}")
+        for k in ("start_state", "state"):
+            if k in fields and not isinstance(fields[k], (str, type(None))):
+                fields[k] = json.dumps(fields[k])
+        cols = ", ".join(f"{k}=?" for k in fields)
+        with self.db:
+            self.db.execute(f"UPDATE farm_runs SET {cols} WHERE id=?", (*fields.values(), run_id))
+
+    def farm_run(self, run_id):
+        r = self.db.execute("SELECT * FROM farm_runs WHERE id=?", (run_id,)).fetchone()
+        return self._farm_dict(r)
+
+    def farm_runs(self, limit=20):
+        return [self._farm_dict(r) for r in self.db.execute(
+            "SELECT * FROM farm_runs ORDER BY id DESC LIMIT ?", (limit,))]
+
+    @staticmethod
+    def _farm_dict(r):
+        if r is None:
+            return None
+        d = dict(r)
+        for k in ("params", "start_state", "state"):
+            d[k] = json.loads(d[k]) if d[k] else None
+        d["stop_requested"] = bool(d["stop_requested"])
+        return d
 
     def unread_count(self):
         return self.db.execute("SELECT COUNT(*) FROM notifications WHERE acked_at IS NULL").fetchone()[0]
