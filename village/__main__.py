@@ -11,6 +11,7 @@
     web               dashboard on http://<this PC>:8765/ (LAN)
 """
 import argparse
+import os
 import sys
 import time
 
@@ -261,6 +262,81 @@ def cmd_farm(args):
     return run(args.run_id)
 
 
+def cmd_session(args):
+    from .session import main as session_main
+    return session_main(args.trigger)
+
+
+def cmd_orchestrator(args):
+    from .orchestrator import main as orch_main
+    orch_main()
+    return 0
+
+
+def cmd_serve(args):
+    """Supervisor: run the dashboard and the orchestrator as child processes
+    and restart either one if it exits (crash, killed). This is what the
+    logon autostart runs, so the bot is reachable from the browser 24/7."""
+    import subprocess
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    logdir = os.path.join(repo, "data", "logs")
+    os.makedirs(logdir, exist_ok=True)
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    specs = {"web": ["web", "--port", str(args.port)], "orchestrator": ["orchestrator"]}
+    procs, restarts = {}, {k: [] for k in specs}
+
+    def launch(name):
+        out = open(os.path.join(logdir, f"{name}.log"), "a", encoding="utf-8")
+        out.write(f"\n--- {time.strftime('%Y-%m-%d %H:%M:%S')} starting {name}\n")
+        out.flush()
+        procs[name] = subprocess.Popen([sys.executable, "-m", "village", *specs[name]], cwd=repo,
+                                       stdout=out, stderr=subprocess.STDOUT, creationflags=flags)
+        out.close()
+
+    for name in specs:
+        launch(name)
+    print(f"serving: dashboard on port {args.port} + orchestrator (logs in {logdir})", flush=True)
+    try:
+        while True:
+            time.sleep(10)
+            for name, p in procs.items():
+                if p.poll() is not None:
+                    now = time.time()
+                    restarts[name] = [t for t in restarts[name] if now - t < 600] + [now]
+                    if len(restarts[name]) > 5:      # crash loop: slow down
+                        time.sleep(60)
+                    print(f"{name} exited ({p.returncode}); restarting", flush=True)
+                    launch(name)
+    except KeyboardInterrupt:
+        for p in procs.values():
+            p.terminate()
+    return 0
+
+
+STARTUP_CMD = "COC_Village_Bot.cmd"
+
+
+def cmd_autostart(args):
+    """Start `serve` at logon via a script in the user's Startup folder (no
+    admin rights needed). --remove deletes it again."""
+    startup = os.path.join(os.environ["APPDATA"], r"Microsoft\Windows\Start Menu\Programs\Startup")
+    path = os.path.join(startup, STARTUP_CMD)
+    if args.remove:
+        if os.path.exists(path):
+            os.remove(path)
+            print(f"removed {path}")
+        else:
+            print("autostart was not installed")
+        return 0
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    pyw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+    exe = pyw if os.path.exists(pyw) else sys.executable
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(f'@echo off\r\ncd /d "{repo}"\r\nstart "" "{exe}" -m village serve\r\n')
+    print(f"installed {path}\n  runs: {exe} -m village serve  (in {repo})")
+    return 0
+
+
 def cmd_web(args):
     from .web import serve
     httpd = serve(args.host, args.port)
@@ -298,6 +374,16 @@ def main(argv=None):
     d.add_argument("--name", help='building/hero name as in game, e.g. "Wizard Tower"')
     d.add_argument("--from", dest="from_level", type=int, help="current level of that copy")
     d.set_defaults(func=cmd_dryrun)
+    se = sub.add_parser("session", help="one session: capture, farm, upgrade (orchestrator runs it)")
+    se.add_argument("--trigger", default="manual")
+    se.set_defaults(func=cmd_session)
+    sub.add_parser("orchestrator", help="the scheduler loop").set_defaults(func=cmd_orchestrator)
+    sv = sub.add_parser("serve", help="dashboard + orchestrator, restarted if they exit")
+    sv.add_argument("--port", type=int, default=8765)
+    sv.set_defaults(func=cmd_serve)
+    au = sub.add_parser("install-autostart", help="start `serve` when you log on")
+    au.add_argument("--remove", action="store_true")
+    au.set_defaults(func=cmd_autostart)
     fm = sub.add_parser("farm", help="run a farming job queued from the dashboard")
     fm.add_argument("--run-id", type=int, required=True)
     fm.set_defaults(func=cmd_farm)

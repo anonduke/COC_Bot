@@ -106,6 +106,26 @@ class BasicWebTest(WebTest):
         self.assertIsNone(farm["current"])
         self.assertEqual(next(r for r in farm["runs"] if r["id"] == rid)["status"], "failed")
 
+    def test_automation_controls(self):
+        status, a = self.api("/api/automation")
+        self.assertEqual(status, 200)
+        self.assertFalse(a["alive"])                     # no orchestrator in tests
+        self.assertEqual(self.api("/api/automation", {"paused": True, "dry_run": True})[0], 200)
+        _, a = self.api("/api/automation")
+        self.assertEqual((a["paused"], a["dry_run"]), (True, True))
+        self.assertEqual(self.api("/api/automation", {"paused": "no"})[0], 400)
+        self.assertEqual(self.api("/api/automation", {})[0], 400)
+        self.assertEqual(self.api("/api/automation", {"paused": True}, header=False)[0], 403)
+
+    def test_run_now_queues_one_command(self):
+        status, r = self.api("/api/automation/run", {})
+        self.assertEqual((status, r["queued"]), (200, True))
+        self.assertEqual(self.api("/api/automation/run", {})[0], 409)   # already requested
+        s = Store(self.db)
+        for c in s.pending_commands():
+            s.finish_command(c["id"], "test")
+        s.close()
+
     def test_state(self):
         status, st = self.api("/api/state")
         self.assertEqual(status, 200)

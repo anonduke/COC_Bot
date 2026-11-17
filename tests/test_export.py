@@ -68,6 +68,10 @@ class RejectTest(unittest.TestCase):
             with self.subTest(text=text), self.assertRaises(ExportError):
                 parse_export(text)
 
+    def test_unknown_id_list_sections_are_skipped(self):
+        snap = parse_export('{"tag": "#A", "timestamp": 1, "buildings": [], "emotes": [126000000, 126000001]}')
+        self.assertEqual(snap.entries, [])
+
     def test_minimal_export(self):
         snap = parse_export('{"tag": "#A", "timestamp": 1, "buildings": [], "skins": [1, 2]}')
         self.assertEqual(snap.entries, [])

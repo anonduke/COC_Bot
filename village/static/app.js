@@ -5,7 +5,7 @@ const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const S = { state: null, history: null, plan: null, catalog: null, settings: null,
             notes: null, status: null, page: "dashboard", catKind: "all", serverSkew: 0 };
-const LIVE_PHASE = 3;   // settings used by phases up to this one are in effect
+const LIVE_PHASE = 9;   // every setting is used by the running automation
 
 // ---------- helpers ----------
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c =>
@@ -78,7 +78,7 @@ const hideTip = () => tip.classList.add("hidden");
 document.addEventListener("scroll", hideTip, true);
 
 // ---------- navigation ----------
-const TITLES = { dashboard: "Dashboard", queue: "Builder queue", attack: "Attack", settings: "Settings", notifications: "Alerts" };
+const TITLES = { dashboard: "Dashboard", queue: "Builder queue", automation: "Automation", attack: "Attack", settings: "Settings", notifications: "Alerts" };
 function go(page) {
   if (!TITLES[page]) page = "dashboard";
   S.page = page;
@@ -88,6 +88,7 @@ function go(page) {
   if (location.hash.slice(1) !== page) history.replaceState(null, "", "#" + page);
   if (page === "queue") loadQueue();
   if (page === "attack") loadFarm();
+  if (page === "automation") loadAuto();
   if (page === "settings") loadSettings();
   if (page === "notifications") loadNotes();
 }
@@ -686,6 +687,89 @@ $("#btn-dryrun").addEventListener("click", async () => {
   } catch (e) { toast(e.message, "error"); }
 });
 
+// ---------- automation ----------
+const ACTION_LABEL = { upgrade: "Upgrade", dry_run: "Dry run", farm: "Farm" };
+function renderAuto() {
+  const a = S.auto; if (!a) return;
+  const o = a.orchestrator || {};
+  // top-bar pill (every page)
+  const pill = $("#pill-auto");
+  let cls = "good", txt;
+  if (!a.alive) { cls = "critical"; txt = "Automation not running"; }
+  else if (o.running) { cls = "good pulse"; txt = "Session running"; }
+  else if (a.paused) { cls = "warning"; txt = "Automation paused"; }
+  else txt = o.next_due ? `Next session ${o.next_due <= now() ? "now" : "in " + dur(o.next_due - now())}` : "Automation on";
+  pill.innerHTML = `<span class="dot ${cls}"></span><span>${txt}${a.dry_run && a.alive ? " · dry run" : ""}</span>`;
+  if (S.page !== "automation") return;
+
+  $("#auto-dead").classList.toggle("hidden", a.alive);
+  $("#auto-on").checked = !a.paused;
+  $("#auto-live").checked = !a.dry_run;
+  $("#auto-farm").checked = a.farm_enabled;
+  $("#auto-mode-chip").textContent = a.dry_run ? "dry run" : "LIVE";
+  $("#auto-mode-chip").className = "phase" + (a.dry_run ? "" : " live");
+  $("#auto-sub").textContent = a.alive ? `automation process running (pid ${o.pid})` : "automation process not running";
+  const nx = $("#auto-next");
+  if (o.running) { nx.textContent = "Running now"; $("#auto-next-why").textContent = `${o.running.trigger}, since ${clock(o.running.since)}`; delete nx.dataset.countdown; }
+  else if (a.paused) { nx.textContent = "Paused"; $("#auto-next-why").textContent = "turn Automation on to schedule sessions"; delete nx.dataset.countdown; }
+  else if (o.next_due) { nx.dataset.countdown = o.next_due; nx.textContent = o.next_due <= now() ? "now" : dur(o.next_due - now());
+    $("#auto-next-why").textContent = `${clock(o.next_due)} · ${o.next_reason}`; }
+  else { nx.textContent = "–"; $("#auto-next-why").textContent = ""; delete nx.dataset.countdown; }
+  $("#auto-run").disabled = !!o.running || a.pending_commands > 0;
+  $("#auto-run").textContent = a.pending_commands > 0 ? "Session requested…" : "Run a session now";
+
+  const last = a.sessions[0];
+  const rows = [
+    ["Process", a.alive ? `<span class="status-label"><span class="dot good"></span>running</span>` : `<span class="status-label"><span class="dot critical"></span>stopped</span>`],
+    ["Heartbeat", o.heartbeat ? ago(o.heartbeat) : "–"],
+    ["Mode", a.dry_run ? "dry run (never confirms)" : "<b>live upgrades</b>"],
+    ["Last session", last ? `#${last.id} ${esc(last.status)}, ${ago(last.ended_at || last.started_at)}` : "none yet"],
+  ];
+  $("#auto-now").innerHTML = rows.map(([k, v]) => `<div class="mini-item"><span class="muted">${k}</span><span>${v}</span></div>`).join("");
+
+  const open = new Set($$(".sess.open").map(e => +e.dataset.id));
+  $("#auto-sessions").innerHTML = a.sessions.length ? a.sessions.map((s, i) => {
+    const t1 = s.ended_at || now();
+    const acts = s.actions.length ? `<table class="data"><thead><tr><th>Action</th><th>Target</th><th>Result</th><th>Detail</th></tr></thead><tbody>${
+      s.actions.map(x => `<tr><td>${ACTION_LABEL[x.kind] || esc(x.kind)}</td>
+        <td>${esc(x.name)}${x.from_level != null ? ` ${x.from_level} → ${x.from_level + 1}` : ""}</td>
+        <td><span class="status-chip ${x.status}">${esc(x.status.replace("_", " "))}</span></td>
+        <td>${detailHTML(x.detail || "")}</td></tr>`).join("")}</tbody></table>` : "";
+    return `<div class="sess ${open.has(s.id) || (i === 0 && !S._sessTouched) ? "open" : ""}" data-id="${s.id}">
+      <div class="sess-head"><b>#${s.id}</b><span class="status-chip ${s.status}">${esc(s.status)}</span>
+        <span>${esc(s.trigger)}</span><span class="when">${clock(s.started_at)} · ${dur(t1 - s.started_at)}</span></div>
+      <div class="sess-body"><div class="sess-lines">${esc(s.summary || (s.status === "running" ? "in progress…" : ""))}</div>${acts}</div></div>`;
+  }).join("") : `<div class="empty">No sessions yet.</div>`;
+}
+async function loadAuto() {
+  try { S.auto = await api("/api/automation"); renderAuto(); } catch { /* keep */ }
+}
+$("#auto-sessions").addEventListener("click", e => {
+  const h = e.target.closest(".sess-head"); if (!h) return;
+  S._sessTouched = true; h.parentElement.classList.toggle("open");
+});
+async function autoSet(body, msg) {
+  try { await api("/api/automation", body); toast(msg); } catch (e) { toast(e.message, "error"); }
+  loadAuto();
+}
+$("#auto-on").addEventListener("change", e => autoSet({ paused: !e.target.checked },
+  e.target.checked ? "Automation on" : "Automation paused"));
+$("#auto-farm").addEventListener("change", e => autoSet({ farm_enabled: e.target.checked },
+  e.target.checked ? "Farming for upgrades on" : "Farming for upgrades off"));
+$("#auto-live").addEventListener("change", e => {
+  if (e.target.checked && !confirm("Turn on LIVE upgrades?\n\nThe bot will press Confirm on upgrades from your queue and spend gold/elixir/dark elixir. It never spends gems; a gem drop pauses automation.")) {
+    e.target.checked = false; return;
+  }
+  autoSet({ dry_run: !e.target.checked }, e.target.checked ? "Live upgrades ON" : "Back to dry run");
+});
+$("#auto-run").addEventListener("click", async () => {
+  try {
+    const r = await api("/api/automation/run", {});
+    toast(r.orchestrator_running ? "Session requested: it starts within ~20 s." : "Requested, but the automation process isn't running.", r.orchestrator_running ? "ok" : "error");
+  } catch (e) { toast(e.message, "error"); }
+  loadAuto();
+});
+
 // ---------- attack / farming ----------
 $("#farm-modes").addEventListener("change", e => {
   if (!e.target.matches("input[type=radio]")) return;
@@ -809,6 +893,7 @@ addEventListener("hashchange", () => go(location.hash.slice(1)));
   setInterval(loadNotesCount, 30000);
   setInterval(loadHistory, 300000);
   setInterval(() => { if (S.page === "queue") loadQueue(); }, 60000);
-  loadFarm();
+  loadFarm(); loadAuto();
   setInterval(() => loadFarm(), 5000);   // cheap; keeps the "Farming" pill live on every page
+  setInterval(() => loadAuto(), 8000);
 })();

@@ -36,18 +36,27 @@ SETTINGS = [
             "Up to this many minutes of random delay before a session, so timing is less regular.", 8, 0, 60),
     Setting("health_check_hours", "Schedule", "Health check every", "int", 12,
             "Hours. Re-read the village even when no builder is due, to notice manual play.", 8, 1, 72),
+    Setting("farm_enabled", "Farming", "Farm when the next upgrade isn't affordable", "bool", True,
+            "During a session, attack until there is enough for the next queued upgrade.", 7),
     Setting("farm_max_attacks", "Farming", "Max attacks per session", "int", 30,
             "Farming stops after this many attacks even if the target isn't reached.", 7, 1, 200),
     Setting("farm_max_minutes", "Farming", "Max farming minutes per session", "int", 60,
             "Farming time budget per session.", 7, 5, 600),
     Setting("farm_margin_pct", "Farming", "Safety margin", "int", 10,
-            "Percent farmed above the cost of the next upgrades.", 7, 0, 100),
-    Setting("upgrade_lookahead", "Upgrades", "Plan items to farm for", "int", 2,
-            "How many upcoming queue steps the farming target covers.", 7, 1, 10),
+            "Percent farmed above the cost of the next upgrade.", 7, 0, 100),
     Setting("dry_run", "Upgrades", "Dry run", "bool", True,
-            "Open upgrade dialogs and read costs, but never press Confirm.", 5),
+            "Open upgrade dialogs and read costs, but never press Confirm. Turn off to let "
+            "the bot really start upgrades from the queue.", 5),
+    Setting("stop_emulator_between", "Schedule", "Close the emulator between sessions", "bool", False,
+            "Saves CPU between sessions; each session then starts the emulator (about 3 min).", 4),
 ]
 BY_KEY = {s.key: s for s in SETTINGS}
+
+
+def effective(store):
+    """{key: value} for every setting: stored value or the default."""
+    stored = store.settings()
+    return {s.key: stored.get(s.key, s.default) for s in SETTINGS}
 _TIME = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 
 

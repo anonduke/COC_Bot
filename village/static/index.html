@@ -17,6 +17,7 @@
     </div>
     <button class="nav-btn active" data-page="dashboard"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg><span>Dashboard</span></button>
     <button class="nav-btn" data-page="queue"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 6h13M8 12h13M8 18h13"/><circle cx="4" cy="6" r="1.2"/><circle cx="4" cy="12" r="1.2"/><circle cx="4" cy="18" r="1.2"/></svg><span>Builder queue</span></button>
+    <button class="nav-btn" data-page="automation"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span>Automation</span></button>
     <button class="nav-btn" data-page="attack"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14.5 17.5L3 6V3h3l11.5 11.5"/><path d="M13 19l6-6M16 16l4 4M19 21l2-2"/></svg><span>Attack</span></button>
     <button class="nav-btn" data-page="settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg><span>Settings</span></button>
     <button class="nav-btn" data-page="notifications"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 8a6 6 0 1 1 12 0c0 7 3 8 3 8H3s3-1 3-8"/><path d="M10 20a2 2 0 0 0 4 0"/></svg><span>Alerts</span><span class="nav-badge hidden" id="nav-unread">0</span></button>
@@ -28,6 +29,7 @@
       <h1 id="page-title">Dashboard</h1>
       <span class="spacer"></span>
       <span class="pill" id="pill-emulator" title="Emulator state, checked every 20 s"><span class="dot"></span><span>Emulator…</span></span>
+      <span class="pill" id="pill-auto" data-goto="automation" style="cursor:pointer" title="Automation status"><span class="dot"></span><span>Automation…</span></span>
       <span class="pill hidden" id="pill-farm" data-goto="attack" style="cursor:pointer" title="Farming run in progress"><span class="dot good pulse"></span><span>Farming</span></span>
       <span class="pill" id="pill-updated" title="Age of the latest village snapshot"><span class="dot"></span><span>—</span></span>
       <button class="btn primary" id="btn-capture" title="Read the village from the game now (about a minute)">
@@ -123,6 +125,40 @@
           <span class="sub">preview: queue order is priority; one upgrade per building or hero at a time; no resource limits yet</span>
           <span class="right legend"><span><i style="background:var(--series-1)"></i>In progress</span><span><i style="background:var(--series-2)"></i>Planned</span></span></div>
         <div class="timeline-wrap" id="plan-timeline"></div>
+      </div>
+    </section>
+
+    <!-- ================= AUTOMATION ================= -->
+    <section id="page-automation" class="hidden">
+      <div class="grid main-split">
+        <div class="card">
+          <div class="card-head"><h2>Automation</h2><span class="sub" id="auto-sub"></span></div>
+          <div class="auto-hero">
+            <div><div class="muted" style="font-size:12.5px">Next session</div>
+              <div class="hero-figure num" id="auto-next" style="font-size:34px">–</div>
+              <div class="muted" id="auto-next-why"></div></div>
+            <div style="margin-left:auto;display:flex;gap:8px;flex-wrap:wrap;align-items:flex-start">
+              <button class="btn primary" id="auto-run">Run a session now</button></div>
+          </div>
+          <div class="set-row"><div><div class="set-label">Automation</div>
+              <div class="set-help">When on, the bot runs sessions by itself: when a builder frees, and a health check every few hours. Paused: only "Run a session now" does anything.</div></div>
+            <div class="set-input"><label class="switch"><input type="checkbox" id="auto-on"><span></span></label></div></div>
+          <div class="set-row"><div><div class="set-label">Live upgrades <span class="phase" id="auto-mode-chip"></span></div>
+              <div class="set-help">Off = dry run: the bot opens each planned upgrade's dialog and closes it again. On = it presses Confirm (resources only, never gems) and checks the upgrade really started.</div></div>
+            <div class="set-input"><label class="switch"><input type="checkbox" id="auto-live"><span></span></label></div></div>
+          <div class="set-row"><div><div class="set-label">Farm for upgrades</div>
+              <div class="set-help">If the next queued upgrade isn't affordable, attack until it is (limits under Settings → Farming). Only in live mode.</div></div>
+            <div class="set-input"><label class="switch"><input type="checkbox" id="auto-farm"><span></span></label></div></div>
+          <div class="warn-box hidden" id="auto-dead"><b>The automation process isn't running.</b> Start it on the PC with <code>python -m village serve</code> (or log on, if autostart is installed). Settings and the queue still save.</div>
+        </div>
+        <div class="card">
+          <div class="card-head"><h2>Now</h2></div>
+          <div id="auto-now" class="mini-list"></div>
+        </div>
+      </div>
+      <div class="card section-gap">
+        <div class="card-head"><h2>Sessions</h2><span class="sub">every visit to the game, with what was done and verified</span></div>
+        <div id="auto-sessions" class="sessions"></div>
       </div>
     </section>
 

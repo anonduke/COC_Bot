@@ -86,12 +86,24 @@ def _settle(timeout, serial, log):
 UNKNOWN_DIR = os.path.join(os.path.dirname(_MISC), "data", "screens", "unknown")
 
 
-def ensure_home(serial=adb.SERIAL, log=print, restart_timeout=150):
+def _wait_focus(serial, timeout, log):
+    """Wait for Clash to own the focus, answering System UI dialogs (which
+    take the focus while they are up)."""
+    end = time.time() + timeout
+    while time.time() < end:
+        if adb.dismiss_systemui_anr(serial):
+            log("dismissed a System UI ANR dialog (Wait)")
+        if adb.wait_for_focus(adb.COC_PACKAGE, 3, serial):
+            return True
+    return False
+
+
+def ensure_home(serial=adb.SERIAL, log=print, restart_timeout=180, first_timeout=60):
     """True once the home screen is showing. Restarts Clash at most once.
     The screen that wasn't recognised is saved to data/screens/unknown/ so
     new popups can be added to POPUPS."""
     # Long enough for RELOAD GAME + Welcome back to play out without a restart.
-    if _settle(60, serial, log):
+    if _settle(first_timeout, serial, log):
         return True
     try:
         os.makedirs(UNKNOWN_DIR, exist_ok=True)
@@ -104,7 +116,7 @@ def ensure_home(serial=adb.SERIAL, log=print, restart_timeout=150):
     time.sleep(2)
     adb.shell(f"monkey -p {adb.COC_PACKAGE} -c android.intent.category.LAUNCHER 1",
               serial=serial)
-    if not adb.wait_for_focus(adb.COC_PACKAGE, 20, serial):
+    if not _wait_focus(serial, 40, log):
         log("Clash did not come to the front after launch")
         return False
     return _settle(restart_timeout, serial, log)

@@ -1,6 +1,6 @@
 """Upgrade executor (Phase 5): find an upgrade in the Builder menu and open
-its dialog. DRY RUN ONLY in this version: it reads the dialog and closes it.
-There is deliberately no function here that taps Confirm.
+its dialog. dry_run() reads the dialog and closes it; upgrade() (Phase 5b)
+confirms it, but only when confirm_checks() passes on the frame it taps on.
 
 Flow, all through adb (see capture.py for the same rules):
   1. home screen (village.home.ensure_home);
@@ -20,14 +20,15 @@ Safety rules, learnt live on 2026-11-14:
     opened with its option already selected). So drags start in the dark gap
     between two rows' outlines, on a settled frame, re-checked just before.
     Even so, about one drag per run still lands as a tap (the row's touch
-    area reaches into the gap): after every drag a dialog check closes it.
-    Before a confirming version exists (Phase 5b) it must re-verify the
-    dialog title on the very frame it taps Confirm on.
+    area reaches into the gap): after every drag a dialog check closes it,
+    and such a stray dialog can never be confirmed: Confirm is only tapped
+    after confirm_checks() passes on the frame the tap is based on.
   * Every tap happens only after the screen it targets was recognised:
     builder counter on the home screen, a row while the panel is open and no
     dialog is, the dialog's X at its known position, the panel's X.
   * The dialog has two Confirm buttons: resources, and a Hammer of Building
-    (a magic item). Neither is ever touched.
+    (a magic item). The magic-item one is never touched; the resource one
+    only by _confirm(), only in upgrade(), only for a free builder.
   * Any time a dialog is open when it shouldn't be, it is closed by its X
     before anything else.
 """
@@ -42,7 +43,8 @@ import numpy as np
 
 from . import adb
 from .capture import capture_lock
-from .home import ensure_home
+from .home import ensure_home, is_home
+from .resources import read_builder_counter
 
 _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _MISC = os.path.join(_REPO, "misc")
@@ -61,6 +63,7 @@ ROW_NAME_X = (1238, 1470)            # row title text
 ROW_TAP_X = 1330                     # inside the title text, away from icons
 LIST_Y = (60, 800)
 DRAG_X = 1385
+DRAG_END_X = 1000                    # scroll drags end over the village, off the panel
 MAX_PAGES = 40
 TITLE_BOX = (250, 38, 1370, 92)      # dialog title, x0 y0 x1 y1
 
@@ -79,6 +82,8 @@ class DryRun:
     title: str = ""
     level: int | None = None
     affordable: bool | None = None    # False: price shown in red
+    confirm_tapped: bool = False
+    confirmed: bool = False           # dialog closed after Confirm (verify by export!)
     reason: str = ""
     screenshots: list = field(default_factory=list)
     rows_opened: list = field(default_factory=list)   # (row text, dialog title)
@@ -99,7 +104,19 @@ def detect_rows(img):
                 bands[-1][1] = y
             else:
                 bands.append([y, y])
-    return [(a1 + 1, b0 - 1) for (_, a1), (b0, _) in zip(bands, bands[1:]) if 50 <= b0 - a1 <= 80]
+    # Between two rows there are TWO outlines a few px apart (the bottom edge
+    # of one row, the top edge of the next). A single dark line inside a row
+    # (text shadow, live 19.32: "Elixir Collector x 7") is not a boundary.
+    bounds = [(a, b) for a, b in zip(bands, bands[1:]) if 3 <= b[0] - a[1] <= 9]
+    rows = [(b1[1] + 1, a2[0] - 1) for (_, b1), (a2, _) in zip(bounds, bounds[1:])
+            if 50 <= a2[0] - b1[1] <= 80]
+    # Rows next to a section header have the double outline on one side only:
+    # add single-band rows that don't overlap one found above.
+    single = [(a1 + 1, b0 - 1) for (_, a1), (b0, _) in zip(bands, bands[1:]) if 50 <= b0 - a1 <= 80]
+    for t, b in single:
+        if all(b < t2 - 3 or t > b2 + 3 for t2, b2 in rows):
+            rows.append((t, b))
+    return sorted(rows)
 
 
 def row_gaps(img, lo=430, hi=760):
@@ -114,10 +131,24 @@ def row_gaps(img, lo=430, hi=760):
 
 
 def row_key(img, top, bottom):
-    """Fingerprint of a row's time/cost text. Ignores the white border the
-    game draws around a row after it was opened, and 1 px position shifts."""
-    crop = cv2.cvtColor(img[top + 8:bottom - 8, 1450:1585], cv2.COLOR_BGR2GRAY)
-    return cv2.resize(crop, (12, 4), interpolation=cv2.INTER_AREA).astype(int) // 24
+    """The row's time/cost text, as a grayscale crop (fixed size), to tell
+    apart rows with the same name (e.g. Wizard Tower 13->14 and 9->10). Live
+    2026-11-16 a 12x4 thumbnail was too coarse and made the 9->10 row look
+    "already opened"."""
+    mid = (top + bottom) // 2
+    return cv2.cvtColor(img[mid - 24:mid + 24, 1440:1590], cv2.COLOR_BGR2GRAY).astype(np.int16)
+
+
+def same_row(a, b, tol=3):
+    """True if two row_key crops show the same text (allowing the white
+    'opened' border and +-3 px of vertical shift). Measured on live rows:
+    same row 0-0.7, different time/cost text >= 5.5."""
+    best = 255
+    for dy in range(-3, 4):
+        x = a[max(0, dy):len(a) + min(0, dy)]
+        y = b[max(0, -dy):len(b) + min(0, -dy)]
+        best = min(best, float(np.abs(x - y).mean()))
+    return best < tol
 
 
 def row_in_progress(img, top, bottom):
@@ -189,6 +220,51 @@ def read_row_name(img, top):
 def read_title(img):
     x0, y0, x1, y1 = TITLE_BOX
     return _tesseract().image_to_string(_white_text(img[y0:y1, x0:x1]), config="--psm 7").strip()
+
+
+def read_title_level(img):
+    """The N of "... to Level N?", read from the title's yellow glyphs with
+    the game-font digit matcher, the "?" glyph dropped first. Tesseract read
+    "Level 10?" as "107" on game 19.32 (the ? taken for a 7)."""
+    from .resources import _wall
+    x0, y0, x1, y1 = TITLE_BOX
+    h, s, v = cv2.split(cv2.cvtColor(img[y0:y1, x0:x1], cv2.COLOR_BGR2HSV))
+    yellow = ((h >= 15) & (h <= 40) & (s >= 110) & (v >= 170)).astype(np.uint8) * 255
+    n, _, st, _ = cv2.connectedComponentsWithStats(yellow, 8)
+    comps = sorted((st[i] for i in range(1, n) if st[i, cv2.CC_STAT_AREA] >= 15),
+                   key=lambda c: c[0])
+    glyphs = []                          # components overlapping in x form one glyph
+    for c in comps:
+        x, w = int(c[0]), int(c[2])
+        if glyphs and x <= glyphs[-1][1] - 1:
+            glyphs[-1][1] = max(glyphs[-1][1], x + w)
+        else:
+            glyphs.append([x, x + w])
+    if not glyphs:
+        return None
+    words = [[glyphs[0]]]
+    for g in glyphs[1:]:
+        (words[-1].append(g) if g[0] - words[-1][-1][1] < 12 else words.append([g]))
+    digits = words[-1][:-1]              # "N?" without the "?"
+    if not digits or len(words) < 2:
+        return None
+    try:
+        text = _wall()._classify_digit_mask(yellow[:, digits[0][0]:digits[-1][1]])
+    except cv2.error:
+        return None
+    return int(text) if text.isdigit() and len(text) == len(digits) else None
+
+
+def read_dialog(img):
+    """(name, level) of an upgrade dialog, or None."""
+    m = re.search(r"upgrade\s+(.+?)\s+to\s+level", read_title(img) or "", re.I)
+    if not m:
+        return None
+    level = read_title_level(img)
+    if level is None:
+        exact = re.search(r"level\s*(\d+)\?", read_title(img), re.I)
+        level = int(exact.group(1)) if exact else None
+    return m.group(1).strip(), level
 
 
 # --- screen checks --------------------------------------------------------------
@@ -270,22 +346,102 @@ def close_panel(serial, log):
         time.sleep(1)
 
 
-# --- the dry run ----------------------------------------------------------------
+# --- confirming (Phase 5b) ------------------------------------------------------
+
+CONFIRM_POS = (1062, 738)            # misc/dialog_confirm.png: the RESOURCE Confirm
+CONFIRM_TAP = (1120, 790)            # middle of that button (label + price)
+KEYCODE_BACK = 4
+
+
+def confirm_checks(img, name, want):
+    """Why Confirm must NOT be tapped on this frame ([] = all checks pass).
+    Everything is checked on the one frame the tap is based on."""
+    problems = []
+    if not dialog_open(img):
+        problems.append("upgrade dialog not open")
+    parsed = read_dialog(img)
+    if not (parsed and same_name(parsed[0], name) and parsed[1] == want):
+        problems.append(f"title is not 'Upgrade {name} to Level {want}' ({parsed})")
+    if price_in_red(img):
+        problems.append("price shown in red (not enough resources)")
+    if not _at(img, "dialog_confirm.png", CONFIRM_POS):
+        problems.append("resource Confirm button not where expected")
+    return problems
+
+
+def _confirm(result, name, want, serial, log, shot_dir):
+    """The dialog for exactly this upgrade is open: confirm it, guarded.
+
+    Only the resource Confirm is ever tapped, never the magic-item one and
+    never a gem button. If anything but a plain close follows (a gem offer
+    for missing resources or busy builders), it is dismissed with Android's
+    BACK key, which never buys anything. confirmed=True only means "the
+    dialog closed"; the caller verifies through a fresh export."""
+    frame = adb.screencap(serial)
+    problems = confirm_checks(frame, name, want)
+    stamp = time.strftime("%Y%m%d_%H%M%S_") + re.sub(r"\W+", "_", name) + f"_{want}"
+    if problems:
+        close_dialog(serial, log)
+        result.reason = "not confirmed: " + "; ".join(problems)
+        return
+    cv2.imwrite(os.path.join(shot_dir, stamp + "_before_confirm.png"), frame)
+    adb.tap(*CONFIRM_TAP, serial=serial)
+    result.confirm_tapped = True
+    log(f"  tapped Confirm for {name} -> {want}")
+    time.sleep(2.5)
+    after = adb.screencap(serial)
+    after_path = os.path.join(shot_dir, stamp + "_after_confirm.png")
+    cv2.imwrite(after_path, after)
+    result.screenshots.append(after_path)
+    if dialog_open(after) and not confirm_checks(after, name, want):
+        # The very same dialog is still up: the tap did not register.
+        close_dialog(serial, log)
+        result.reason = "Confirm tap did not register; dialog closed, nothing spent"
+        return
+    if panel_open(after) or is_home(after):
+        result.confirmed = True
+        result.reason = "confirmed (dialog closed); to be verified by export"
+        return
+    # Something else popped up: back out without touching it.
+    for _ in range(3):
+        adb.shell(f"input keyevent {KEYCODE_BACK}", serial=serial)
+        time.sleep(1.5)
+        img = adb.screencap(serial)
+        if panel_open(img) or is_home(img):
+            break
+    result.reason = ("an unexpected popup followed Confirm (e.g. a gem offer); dismissed "
+                     "with BACK, nothing tapped in it; see the after_confirm screenshot")
+
+
+# --- find, then dry run or confirm ------------------------------------------------
 
 def dry_run(name, from_level, serial=adb.SERIAL, log=print, shot_dir=SHOT_DIR):
     """Find the upgrade `name` from_level -> from_level + 1 in the Builder menu,
     open its dialog, record it, close it. Never confirms. Returns DryRun."""
     with capture_lock(wait=30):
-        return _dry_run(name, from_level, serial, log, shot_dir)
+        return _run(name, from_level, serial, log, shot_dir, confirm=False)
 
 
-def _dry_run(name, from_level, serial, log, shot_dir):
+def upgrade(name, from_level, serial=adb.SERIAL, log=print, shot_dir=SHOT_DIR):
+    """Like dry_run, but confirms the upgrade when every check passes and a
+    builder is free. result.confirmed = the dialog closed after Confirm."""
+    with capture_lock(wait=30):
+        return _run(name, from_level, serial, log, shot_dir, confirm=True)
+
+
+def _run(name, from_level, serial, log, shot_dir, confirm):
     result = DryRun(name, from_level)
     want = from_level + 1
     os.makedirs(shot_dir, exist_ok=True)
     if not ensure_home(serial, log):
         result.reason = "could not reach the home screen"
         return result
+    if confirm:
+        counter = read_builder_counter(adb.screencap(serial))
+        if not counter or counter[0] < 1:
+            # Confirm with no free builder opens a gem-priced Goblin Builder offer.
+            result.reason = f"no free builder on the counter ({counter})"
+            return result
 
     # The counter was just read on the home screen by ensure_home.
     adb.tap(*COUNTER_TAP, serial=serial)
@@ -313,7 +469,7 @@ def _dry_run(name, from_level, serial, log, shot_dir):
                 if not same_name(text, name):
                     continue
                 key = row_key(img, top, bottom)
-                if any(normalize(text) == t and np.abs(key - k).max() <= 1 for t, k in tried):
+                if any(normalize(text) == t and same_row(key, k) for t, k in tried):
                     continue
                 tried.append((normalize(text), key))
                 # Open this row's dialog: tap inside the title text.
@@ -325,36 +481,43 @@ def _dry_run(name, from_level, serial, log, shot_dir):
                 time.sleep(0.6)                      # let the open animation finish
                 dimg = adb.screencap(serial)
                 title = read_title(dimg)
-                parsed = parse_title(title)
+                parsed = read_dialog(dimg)
                 path = os.path.join(shot_dir, time.strftime("%Y%m%d_%H%M%S_") +
                                     re.sub(r"\W+", "_", name) + f"_{want}.png")
                 cv2.imwrite(path, dimg)
                 result.screenshots.append(path)
                 result.rows_opened.append((text, title))
                 log(f"  row {text!r} -> dialog {title!r}")
-                close_dialog(serial, log)
                 if parsed and same_name(parsed[0], name) and parsed[1] == want:
                     result.found, result.title, result.level = True, title, parsed[1]
                     result.affordable = not price_in_red(dimg)
-                    result.reason = ("dialog matches the planned upgrade (dry run: not confirmed)"
-                                     + ("" if result.affordable else
-                                        "; the price is shown in red: not enough resources"))
+                    if confirm and result.affordable:
+                        _confirm(result, name, want, serial, log, shot_dir)
+                    else:
+                        close_dialog(serial, log)
+                        result.reason = (
+                            "dialog matches the planned upgrade"
+                            + ("" if confirm else " (dry run: not confirmed)")
+                            + ("" if result.affordable else
+                               "; the price is shown in red: not enough resources"))
                     return result
+                close_dialog(serial, log)
                 opened_one = True
                 break                                # re-read rows after the dialog
             if opened_one:
                 continue
             # Nothing (new) here: scroll from a gap between rows.
-            gaps = row_gaps(img)
-            if not gaps:
-                result.reason = "no safe place to start a scroll drag"
-                return result
-            y0 = gaps[-1]
+            # Diagonal drag that ends off the panel, so the finger is not on
+            # the pressed row at release. Live 2026-11-16: drags from the gap
+            # between rows opened a row's dialog in up to 1 of 2 drags, margin
+            # drags in 1-4 of 10, diagonal drags in 1 of 10. A dialog opened
+            # this way is closed below and can never be confirmed.
+            x0, y0 = DRAG_X, 720
             # Re-check right before the drag: same list, same place, no dialog.
             now_img = adb.screencap(serial)
             if dialog_open(now_img) or np.abs(_list_strip(now_img) - _list_strip(img)).mean() >= 1.0:
                 continue
-            adb.swipe(DRAG_X, y0, DRAG_X, max(LIST_Y[0] + 30, y0 - 380), 800, serial=serial)
+            adb.swipe(x0, y0, DRAG_END_X, y0 - 380, 800, serial=serial)
             time.sleep(1.2)
             after = settled_frame(serial)
             if dialog_open(after):

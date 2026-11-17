@@ -39,15 +39,17 @@ MORE_SETTINGS_LINK = "https://link.clashofclans.com/en/?action=OpenMoreSettings"
 _MISC = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "misc")
 
 # Positions on the 1600x900 emulator screen (top-left of the template match).
-TITLE_POS = (680, 82)          # "More Settings" title
-CLOSE_OFFSET = (610, 15)       # red X, relative to TITLE_POS -> (1290, 97)
-ROW_POS = (358, 540)           # "Export Village data in JSON format", list at its end
-COPY_OFFSET = (774, 20)        # Copy button, relative to ROW_POS -> (1132, 560)
+# Game 19.32.4 (2026-11-16) moved More Settings into a tabbed menu; the
+# templates and positions below are from that version.
+TITLE_POS = (1192, 52)         # the active "Settings" tab
+CLOSE_OFFSET = (206, 18)       # red X, relative to TITLE_POS -> (1398, 70)
+ROW_POS = (335, 548)           # "Export Village data in JSON format", list at its end
+COPY_OFFSET = (828, 19)        # Copy button, relative to ROW_POS -> (1163, 567)
 DRAG_X, DRAG_FROM_Y, DRAG_TO_Y = 560, 720, 230
 MATCH_MIN = 0.85
 POS_TOL = 12
-MAX_DRAGS = 16
-BLIND_DRAGS = 8                # live: the row is reached after 8 drags from the top
+MAX_DRAGS = 20
+BLIND_DRAGS = 13               # 19.32: the list is longer; live the row needed 14 drags
 
 SENTINEL = "coc-bot: waiting for village export"
 
@@ -120,11 +122,23 @@ def _close_dialog(title_tpl, serial):
 LOCK_PATH = os.path.join(os.path.dirname(_MISC), "data", "capture.lock")
 
 
+_held = {}   # lock path -> nesting depth held by this process
+
+
 @contextmanager
 def capture_lock(path=LOCK_PATH, wait=5.0):
     """Only one process may drive the game at a time. An OS byte-range lock:
     released automatically if the holder dies, so it never goes stale.
-    Retries for `wait` seconds (the dashboard probes the lock briefly)."""
+    Retries for `wait` seconds (the dashboard probes the lock briefly).
+    Re-entrant within a process: a session holds it while it captures,
+    farms and upgrades, each of which takes it too."""
+    if _held.get(path):
+        _held[path] += 1
+        try:
+            yield
+        finally:
+            _held[path] -= 1
+        return
     os.makedirs(os.path.dirname(path), exist_ok=True)
     f = open(path, "a+")
     try:
@@ -138,9 +152,11 @@ def capture_lock(path=LOCK_PATH, wait=5.0):
                 if time.time() >= end:
                     raise CaptureError("another capture is already running") from None
                 time.sleep(0.25)
+        _held[path] = 1
         try:
             yield
         finally:
+            _held[path] = 0
             f.seek(0)
             msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
     finally:
@@ -148,6 +164,9 @@ def capture_lock(path=LOCK_PATH, wait=5.0):
 
 
 def is_capture_running(path=LOCK_PATH):
+    """True if any process, including this one, holds the lock."""
+    if _held.get(path):
+        return True
     try:
         with capture_lock(path, wait=0):
             return False

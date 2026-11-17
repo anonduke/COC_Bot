@@ -274,6 +274,20 @@ a { color: var(--accent); }
 .levelbar i { width: 6px; height: 6px; border-radius: 2px; background: var(--surface-3); }
 .levelbar i.on { background: var(--series-1); }
 
+/* ---------- automation ---------- */
+.auto-hero { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; margin-bottom: 8px; }
+.sessions { display: flex; flex-direction: column; gap: 10px; }
+.sess { background: var(--surface-2); border-radius: 10px; padding: 11px 13px; }
+.sess-head { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; cursor: pointer; }
+.sess-head .when { color: var(--text-muted); font-size: 12.5px; margin-left: auto; }
+.sess-body { margin-top: 8px; display: none; }
+.sess.open .sess-body { display: block; }
+.sess-lines { font-size: 12.5px; color: var(--text-secondary); white-space: pre-wrap; margin-bottom: 8px; }
+.status-chip.verified, .status-chip.done { color: var(--good-text); }
+.status-chip.not_applied, .status-chip.interrupted, .status-chip.skipped { color: var(--warning); }
+.status-chip.dry_run, .status-chip.intent { color: var(--series-1); }
+code { background: var(--surface-3); padding: 1px 5px; border-radius: 5px; font-size: 12.5px; }
+
 /* ---------- attack ---------- */
 .modes { display: grid; gap: 10px; margin-bottom: 8px; }
 .mode {

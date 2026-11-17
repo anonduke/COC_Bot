@@ -192,6 +192,10 @@ def run(run_id):
                 sys.path.insert(0, repo)
             import threading
             import Ranked_Copy as R
+            # Ranked_Copy's own focus routine can't get past Windows' foreground
+            # lock from a background process; use the ALT-key workaround.
+            from . import winfocus
+            R._force_foreground = lambda win, tries=3: winfocus.bring_to_front(win._hWnd, tries)
             R.CONFIG["ranked_mode"] = p["ranked"]
             R.CONFIG["event_troops"] = p["event_troops"]
             R.cleanup_session()

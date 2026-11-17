@@ -437,6 +437,67 @@ Code: `village/` package, tests in `tests/` (`python -m unittest discover -s tes
 
 ---
 
+### Status after the 2026-11-16 build (Phases 4–9)
+Everything below runs as one service: `python -m village serve` (dashboard + orchestrator, each restarted if it exits). It is started at logon by `python -m village install-autostart`, a script in the user's Startup folder that needs no admin rights.
+
+**Phase 4, emulator manager** (`village/emulator.py`): start / stop LDPlayer, System UI dialog → Wait, hide ad windows, launch Clash, home screen, frozen-picture check (one restart).
+- Live: 3/3 cold starts from fully off reached the home screen in 172–197 s.
+- Found while testing: relaunching too soon after a quit left LDPlayer without its network helper (`VBoxNetNAT`), so adb could not connect. `stop()` now waits until LDPlayer has really exited, and `start()` restarts once if adb never connects.
+- A cold game load takes over a minute, so the first home-screen wait after a launch is 3 min.
+
+**Phase 5b, real upgrades** (`upgrader.upgrade`). Confirm is tapped only when all of these hold on the same frame:
+- the dialog X is in place;
+- the title says exactly `<name>` and `Level <from+1>`;
+- the price is not red;
+- the resource Confirm button is in place;
+- the builder counter shows a free builder.
+
+Never the magic-item Confirm, never a gem button. Anything unexpected after Confirm is dismissed with Android BACK. Success is decided by a fresh export: the diff must show the upgrade started.
+- Game 19.32.4: Tesseract read "Level 10?" as "107". Levels are now read from the title's yellow glyphs with the game-font digit matcher, "?" dropped first.
+- Drags in the panel can still act as taps on a row: from the gap between rows up to 1 in 2, ending off the panel 1 in 10. Such a dialog is closed at once and can never be confirmed (the title check fails).
+- Row identity: the old 12×4 fingerprint merged "Wizard Tower 13→14" with "9→10". It now compares the full time/cost crop: same row 0–0.7, different ≥ 5.5, threshold 3.
+- Live dry run on 19.32.4: Wizard Tower 9→10 found after correctly rejecting the 13→14 row.
+- **Not yet done live:** no free builder all evening (next 00:13), and live mode is the user's switch.
+
+**Phase 6, planner** (`village/planner.py`):
+- Queue order is priority. Per item, the lowest idle copy below target; busy items are skipped, never blocking.
+- Affordability is taken from the tables as an upper bound; the dialog decides.
+- A storage-capacity check uses the bar fill: an upgrade dearer than the storage is never farmed for.
+
+**Phase 7, farming in sessions:**
+- If the next step isn't affordable (live mode, farming on), the session farms with `target` mode: cost + margin, capped below capacity. It then re-captures and lets the dialog decide.
+- Dashboard farming: background starts failed because Windows refused to bring LDPlayer to the front ("foreground lock"). Fixed with a synthetic ALT press (`village/winfocus.py`). Live: 1/1 attack done from the dashboard.
+
+**Phase 8, orchestrator** (`village/orchestrator.py`), tick every 20 s:
+- due = builder free with work (back-off 30 min / 2 h after sessions without progress), else the next builder freeing, grouped within the window; health check; active hours; jitter;
+- sessions run as child processes with a 3 h timeout;
+- dashboard commands; heartbeat in `kv`;
+- stale sessions are marked interrupted;
+- unverified INTENT actions are resolved from the next export, never repeated;
+- gem guard: any gem drop pauses automation.
+
+**Phase 9, dashboard:** an Automation page, also usable from a phone:
+- automation on/pause, live/dry run (with a confirmation prompt), farming on/off;
+- Run a session now, next session countdown and reason;
+- session history with every action, its verification and screenshots;
+- a status pill on every page.
+
+**Game update 19.32.4 (2026-11-16):**
+- More Settings became a tabbed menu: new templates, the list needs ~14 drags;
+- the export gained an `emotes` ID list;
+- static data is re-extracted automatically per version (1,261 objects);
+- Town Hall 19 is now available.
+
+**Tests:** 149 unit/integration tests (planner, session with a fake game, orchestrator with a fake clock, web API, confirm guards on real dialog crops).
+- Live end-to-end: dashboard "Run a session now" → orchestrator → session #2 → capture → "no free builder", correct.
+
+**Still open:**
+- the first live upgrade (needs a free builder + live mode);
+- Phase 3's 24 h forecast check and the Phase 10 7-day soak: these now run as the service operates;
+- the Windows Firewall rule for access from other devices (needs admin, see README in chat).
+
+---
+
 ## 6. Risks and limitations
 
 | # | Risk | Impact | Mitigation |

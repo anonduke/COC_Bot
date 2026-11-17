@@ -136,6 +136,8 @@ def parse_export(text):
     for section, items in raw.items():
         if section in ID_LIST_SECTIONS or not isinstance(items, list):
             continue
+        if section not in JOB_KIND and items and all(isinstance(i, int) for i in items):
+            continue   # plain ID lists (cosmetics); 19.32 added "emotes"
         for item in items:
             entries.append(_entry(section, item))
             for archetype in item.get("types", []):

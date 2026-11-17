@@ -244,6 +244,47 @@ def start_dryrun(store):
     return _start_game_job(["dryrun", "--queue"], "dry run")
 
 
+ORCH_ALIVE = 90        # seconds without an orchestrator heartbeat = not running
+
+
+def automation_payload(store):
+    from .settings import effective
+    cfg = effective(store)
+    orch = store.kv_get("orchestrator") or {}
+    now = time.time()
+    alive = bool(orch) and now - orch.get("heartbeat", 0) < ORCH_ALIVE
+    return {"now": now, "alive": alive, "orchestrator": orch,
+            "paused": bool(cfg["automation_paused"]), "dry_run": bool(cfg["dry_run"]),
+            "farm_enabled": bool(cfg["farm_enabled"]),
+            "pending_commands": len(store.pending_commands()),
+            "sessions": store.sessions(15)}
+
+
+def automation_update(store, body):
+    clean = {}
+    for key in ("paused", "dry_run", "farm_enabled"):
+        if key in body:
+            if not isinstance(body[key], bool):
+                raise ApiError(400, f"{key} must be true or false")
+            clean["automation_paused" if key == "paused" else key] = body[key]
+    if not clean:
+        raise ApiError(400, "send paused, dry_run and/or farm_enabled")
+    for k, v in clean.items():
+        store.set_setting(k, v)
+    if clean.get("dry_run") is False:
+        store.notify("warning", "web", "Dry run turned OFF: sessions will now really start "
+                     "upgrades from the queue", "Turned off from the dashboard.")
+    return {"saved": sorted(clean)}
+
+
+def automation_run_now(store):
+    if any(c["kind"] == "run_session" for c in store.pending_commands()):
+        raise ApiError(409, "a session is already requested")
+    store.add_command("run_session")
+    alive = automation_payload(store)["alive"]
+    return {"queued": True, "orchestrator_running": alive}
+
+
 FARM_STALE = 20 * 60   # a running farm with no progress for this long is dead
 
 
@@ -434,6 +475,9 @@ class Handler(BaseHTTPRequestHandler):
                 ("GET", "/api/status"): lambda: self._status(),
                 ("POST", "/api/actions/capture"): lambda: start_capture(store),
                 ("POST", "/api/actions/dryrun"): lambda: start_dryrun(store),
+                ("GET", "/api/automation"): lambda: automation_payload(store),
+                ("POST", "/api/automation"): lambda: automation_update(store, body),
+                ("POST", "/api/automation/run"): lambda: automation_run_now(store),
                 ("GET", "/api/farm"): lambda: farm_payload(store),
                 ("POST", "/api/farm/start"): lambda: farm_start(store, body),
                 ("POST", "/api/farm/stop"): lambda: farm_stop(store),

@@ -85,6 +85,44 @@ _MIGRATIONS = [
         pid            INTEGER
     );
     """,
+    # v5: orchestrator: sessions, the action journal, commands, runtime status
+    """
+    CREATE TABLE sessions (
+        id          INTEGER PRIMARY KEY,
+        trigger     TEXT NOT NULL,          -- builder_free, health_check, manual, retry
+        started_at  INTEGER NOT NULL,
+        ended_at    INTEGER,
+        status      TEXT NOT NULL,          -- running, done, failed, interrupted
+        summary     TEXT NOT NULL DEFAULT '',
+        pid         INTEGER
+    );
+    CREATE TABLE actions (
+        id              INTEGER PRIMARY KEY,
+        session_id      INTEGER REFERENCES sessions(id),
+        created_at      INTEGER NOT NULL,
+        kind            TEXT NOT NULL,      -- upgrade, dry_run, farm
+        data_id         INTEGER,
+        name            TEXT NOT NULL DEFAULT '',
+        from_level      INTEGER,
+        before_snapshot INTEGER,
+        status          TEXT NOT NULL,      -- intent, verified, not_applied, skipped, dry_run, failed
+        detail          TEXT NOT NULL DEFAULT '',
+        updated_at      INTEGER
+    );
+    CREATE INDEX actions_status ON actions (status);
+    CREATE TABLE commands (
+        id         INTEGER PRIMARY KEY,
+        created_at INTEGER NOT NULL,
+        kind       TEXT NOT NULL,           -- run_session
+        done_at    INTEGER,
+        result     TEXT NOT NULL DEFAULT ''
+    );
+    CREATE TABLE kv (
+        key        TEXT PRIMARY KEY,
+        value      TEXT NOT NULL,           -- JSON
+        updated_at INTEGER NOT NULL
+    );
+    """,
 ]
 SEVERITIES = ("info", "warning", "error")
 
@@ -301,6 +339,81 @@ class Store:
             d[k] = json.loads(d[k]) if d[k] else None
         d["stop_requested"] = bool(d["stop_requested"])
         return d
+
+    # --- orchestrator ---------------------------------------------------------
+    def kv_get(self, key, default=None):
+        r = self.db.execute("SELECT value FROM kv WHERE key=?", (key,)).fetchone()
+        return json.loads(r[0]) if r else default
+
+    def kv_set(self, key, value):
+        with self.db:
+            self.db.execute(
+                "INSERT INTO kv (key, value, updated_at) VALUES (?,?,?) ON CONFLICT(key) DO "
+                "UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+                (key, json.dumps(value), int(time.time())))
+
+    def start_session(self, trigger):
+        with self.db:
+            return self.db.execute(
+                "INSERT INTO sessions (trigger, started_at, status, pid) VALUES (?,?,'running',?)",
+                (trigger, int(time.time()), os.getpid())).lastrowid
+
+    def end_session(self, session_id, status, summary):
+        with self.db:
+            self.db.execute("UPDATE sessions SET ended_at=?, status=?, summary=? WHERE id=?",
+                            (int(time.time()), status, summary, session_id))
+
+    def sessions(self, limit=30):
+        rows = [dict(r) for r in self.db.execute(
+            "SELECT * FROM sessions ORDER BY id DESC LIMIT ?", (limit,))]
+        for r in rows:
+            r["actions"] = self.actions(session_id=r["id"])
+        return rows
+
+    def add_action(self, session_id, kind, status, data_id=None, name="", from_level=None,
+                   before_snapshot=None, detail=""):
+        now = int(time.time())
+        with self.db:
+            return self.db.execute(
+                "INSERT INTO actions (session_id, created_at, kind, data_id, name, from_level,"
+                " before_snapshot, status, detail, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (session_id, now, kind, data_id, name, from_level, before_snapshot, status,
+                 detail, now)).lastrowid
+
+    def update_action(self, action_id, status, detail=None):
+        with self.db:
+            if detail is None:
+                self.db.execute("UPDATE actions SET status=?, updated_at=? WHERE id=?",
+                                (status, int(time.time()), action_id))
+            else:
+                self.db.execute("UPDATE actions SET status=?, detail=?, updated_at=? WHERE id=?",
+                                (status, detail, int(time.time()), action_id))
+
+    def actions(self, session_id=None, status=None, limit=200):
+        sql, args = "SELECT * FROM actions WHERE 1=1", []
+        if session_id is not None:
+            sql += " AND session_id=?"
+            args.append(session_id)
+        if status is not None:
+            sql += " AND status=?"
+            args.append(status)
+        sql += " ORDER BY id LIMIT ?"
+        args.append(limit)
+        return [dict(r) for r in self.db.execute(sql, args)]
+
+    def add_command(self, kind):
+        with self.db:
+            return self.db.execute("INSERT INTO commands (created_at, kind) VALUES (?,?)",
+                                   (int(time.time()), kind)).lastrowid
+
+    def pending_commands(self):
+        return [dict(r) for r in self.db.execute(
+            "SELECT * FROM commands WHERE done_at IS NULL ORDER BY id")]
+
+    def finish_command(self, command_id, result):
+        with self.db:
+            self.db.execute("UPDATE commands SET done_at=?, result=? WHERE id=?",
+                            (int(time.time()), result, command_id))
 
     def unread_count(self):
         return self.db.execute("SELECT COUNT(*) FROM notifications WHERE acked_at IS NULL").fetchone()[0]
