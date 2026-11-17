@@ -137,8 +137,8 @@ def picture_frozen(serial=adb.SERIAL, gap=4.0):
     return int((np.abs(a - b).sum(axis=2) > 30).sum()) == 0
 
 
-def ensure_ready(log=print, serial=adb.SERIAL, _restarted=False):
-    """Bring the game to its home screen; raises EmulatorError with the reason."""
+def _ready_once(log, serial):
+    """One attempt; raises EmulatorError / adb.AdbError on any failure."""
     if not booted(serial):
         start(log, serial)
     for _ in range(3):
@@ -157,11 +157,25 @@ def ensure_ready(log=print, serial=adb.SERIAL, _restarted=False):
     if not ensure_home(serial, log, first_timeout=180 if fresh else 60):
         raise EmulatorError("could not reach the home screen")
     if picture_frozen(serial):
-        if _restarted:
-            raise EmulatorError("the game picture is frozen even after an emulator restart")
-        log("game picture frozen: restarting the emulator")
-        stop(log)
-        start(log, serial)
-        return ensure_ready(log, serial, _restarted=True)
+        raise EmulatorError("the game picture is frozen")
     hide_ad_windows()
+
+
+def ensure_ready(log=print, serial=adb.SERIAL):
+    """Bring the game to its home screen. Any failure (hung graphics: no
+    focus, black screenshots, launch timing out; a frozen picture; home not
+    reachable) gets ONE full emulator restart, then the error is raised.
+    Live 2026-11-17: after 16 h the emulator's graphics hung (no focused
+    window, black frames) and every session failed until it was restarted."""
+    try:
+        _ready_once(log, serial)
+        return True
+    except (EmulatorError, adb.AdbError) as e:
+        log(f"emulator not usable ({e}): restarting it")
+    stop(log)
+    start(log, serial)
+    try:
+        _ready_once(log, serial)
+    except (EmulatorError, adb.AdbError) as e:
+        raise EmulatorError(f"still not usable after an emulator restart: {e}") from e
     return True

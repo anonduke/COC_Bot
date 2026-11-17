@@ -72,7 +72,9 @@ def swipe(x1, y1, x2, y2, ms=800, times=1, serial=SERIAL):
 def focused_window(serial=SERIAL):
     """The focused window line from dumpsys, e.g.
     'Window{2e43be6 u0 com.supercell.clashofclans/com.supercell.titan.GameApp}'."""
-    out = shell("dumpsys window | grep -m1 mCurrentFocus", serial=serial)
+    # "|| true": grep exits 1 when the line is missing for a moment (system
+    # busy); that means "no focus right now", not an adb failure.
+    out = shell("dumpsys window | grep -m1 mCurrentFocus || true", serial=serial)
     return out.split("=", 1)[1].strip() if "=" in out else out
 
 

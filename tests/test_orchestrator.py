@@ -108,8 +108,9 @@ class TickTest(unittest.TestCase):
         self.store = Store(os.path.join(self.tmp.name, "v.db"))
         self.spawned = []
         self.now = [ts("12:00")]
+        self.busy = False
         self.orc = o.Orchestrator(self.store, log=lambda m: None, spawn=self._spawn,
-                                  clock=lambda: self.now[0])
+                                  clock=lambda: self.now[0], game_busy=lambda: self.busy)
         self.store.set_setting("jitter_min", 0)
         self.store.set_setting("active_start", "00:00")
         self.store.set_setting("active_end", "00:00")
@@ -167,6 +168,31 @@ class TickTest(unittest.TestCase):
         self.assertEqual(self.spawned, [])
         self.assertEqual(state["next_due"], ts("07:00", 16))
         self.now[0] = ts("07:00", 16) + 1
+        self.orc.tick()
+        self.assertEqual(len(self.spawned), 1)
+
+    def test_failed_session_backs_off(self):
+        self.orc.tick()                                   # first look starts
+        _, p = self.spawned[0]
+        p.code = 1
+        p.kill()                                          # ...and fails
+        self.orc.tick()                                   # reaped; must NOT restart now
+        self.assertEqual(len(self.spawned), 1)
+        self.assertIn("retry after 1 failed", self.store.kv_get("orchestrator")["next_reason"])
+        self.now[0] += 10 * 60 + 1
+        self.orc.tick()
+        self.assertEqual(len(self.spawned), 2)
+        _, p2 = self.spawned[1]
+        p2.kill()                                         # succeeds: streak cleared
+        self.orc.tick()
+        self.assertEqual(self.store.kv_get("fail_streak")["n"], 0)
+
+    def test_waits_while_the_game_is_busy(self):
+        self.busy = True                     # e.g. a farming run from the dashboard
+        state = self.orc.tick()
+        self.assertEqual(self.spawned, [])
+        self.assertIn("game is busy", state["next_reason"])
+        self.busy = False
         self.orc.tick()
         self.assertEqual(len(self.spawned), 1)
 

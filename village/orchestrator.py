@@ -30,6 +30,7 @@ from .settings import effective
 TICK = 20
 SESSION_TIMEOUT = 3 * 3600
 BACKOFF = (30 * 60, 2 * 3600)
+FAIL_BACKOFF = (10 * 60, 30 * 60, 2 * 3600)   # after failed sessions (any trigger)
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
@@ -91,9 +92,12 @@ def next_due(now, latest, gamedata, has_work, cfg, no_progress=0, last_end=None)
 
 
 class Orchestrator:
-    def __init__(self, store, log=print, spawn=None, clock=time.time):
+    def __init__(self, store, log=print, spawn=None, clock=time.time, game_busy=None):
         self.store, self.log, self.clock = store, log, clock
         self.spawn = spawn or self._spawn
+        if game_busy is None:
+            from .capture import is_capture_running as game_busy
+        self.game_busy = game_busy
         self.proc = None
         self.current = None        # (trigger, started_at)
         self._jitter = {}
@@ -130,6 +134,10 @@ class Orchestrator:
         progress = last.get("upgrades", 0) > 0 or "builder" not in self.current[0]
         streak = 0 if progress and code == 0 else self.store.kv_get("no_progress", 0) + 1
         self.store.kv_set("no_progress", streak)
+        # A failed session leaves its due time in the past: without this the
+        # next tick would start it again (seen live 2026-11-17).
+        fails = 0 if code == 0 else self.store.kv_get("fail_streak", {}).get("n", 0) + 1
+        self.store.kv_set("fail_streak", {"n": fails, "at": self.clock()})
         self.proc, self.current = None, None
 
     # --- scheduling -----------------------------------------------------------
@@ -150,6 +158,11 @@ class Orchestrator:
         due, reason = next_due(self.clock(), latest, gd, self._has_work(gd, cfg) if gd else
                                (lambda s: False), cfg, self.store.kv_get("no_progress", 0),
                                last.get("ended_at"))
+        fails = self.store.kv_get("fail_streak", {})
+        if fails.get("n"):
+            retry = fails["at"] + FAIL_BACKOFF[min(fails["n"], len(FAIL_BACKOFF)) - 1]
+            if retry > due:
+                due, reason = retry, f"retry after {fails['n']} failed session(s)"
         key = (int(due), reason)
         if key not in self._jitter:                  # drawn once per due moment
             self._jitter = {key: random.uniform(0, cfg["jitter_min"] * 60)}
@@ -173,8 +186,7 @@ class Orchestrator:
         state["paused"] = bool(cfg["automation_paused"])
         active = in_active_hours(now, cfg["active_start"], cfg["active_end"])
         if self.proc is None and not state["paused"] and due <= now and active:
-            from .capture import is_capture_running
-            if is_capture_running():
+            if self.game_busy():
                 reason += " (waiting: the game is busy, e.g. a farming run)"
             else:
                 self.start_session(reason.split(" (")[0])

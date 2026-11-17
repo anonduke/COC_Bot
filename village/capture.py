@@ -126,12 +126,13 @@ _held = {}   # lock path -> nesting depth held by this process
 
 
 @contextmanager
-def capture_lock(path=LOCK_PATH, wait=5.0):
+def capture_lock(path=None, wait=5.0):
     """Only one process may drive the game at a time. An OS byte-range lock:
     released automatically if the holder dies, so it never goes stale.
     Retries for `wait` seconds (the dashboard probes the lock briefly).
     Re-entrant within a process: a session holds it while it captures,
     farms and upgrades, each of which takes it too."""
+    path = path or LOCK_PATH
     if _held.get(path):
         _held[path] += 1
         try:
@@ -163,8 +164,9 @@ def capture_lock(path=LOCK_PATH, wait=5.0):
         f.close()
 
 
-def is_capture_running(path=LOCK_PATH):
+def is_capture_running(path=None):
     """True if any process, including this one, holds the lock."""
+    path = path or LOCK_PATH
     if _held.get(path):
         return True
     try:
