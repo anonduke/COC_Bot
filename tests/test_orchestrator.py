@@ -48,16 +48,24 @@ class ActiveHoursTest(unittest.TestCase):
 
 class NextDueTest(unittest.TestCase):
     def test_first_look(self):
-        self.assertEqual(o.next_due(100, None, None, WORK, CFG), (100, "first look at the village"))
+        self.assertEqual(o.next_due(100, None, None, WORK, CFG), (0, "first look at the village"))
 
-    def test_free_builder_with_work_is_now(self):
+    def test_free_builder_with_work_is_due_since_capture(self):
         now = ts("12:00")
-        self.assertEqual(o.next_due(now, latest(now, free=1), None, WORK, CFG)[0], now)
+        snap = latest(now, free=1, captured_ago=600)
+        self.assertEqual(o.next_due(now, snap, None, WORK, CFG), (now - 600, "builder free"))
+        # stable: asking again later gives the same moment (the 2026-11-17 bug)
+        self.assertEqual(o.next_due(now + 300, snap, None, WORK, CFG)[0], now - 600)
 
     def test_free_builder_without_work_waits_for_health_check(self):
         now = ts("12:00")
         due, why = o.next_due(now, latest(now, free=1), None, NO_WORK, CFG)
         self.assertEqual((due, why), (now + CFG["health_check_hours"] * H, "health check"))
+
+    def test_builder_freed_after_capture(self):
+        now = ts("12:00")
+        snap = latest(now, jobs=(now - 900,), free=0, total=1, captured_ago=3600)
+        self.assertEqual(o.next_due(now, snap, None, WORK, CFG), (now - 900, "builder free"))
 
     def test_busy_builders_wait_for_next_free_grouped(self):
         now = ts("12:00")
@@ -69,19 +77,14 @@ class NextDueTest(unittest.TestCase):
     def test_backoff_after_no_progress(self):
         now = ts("12:00")
         due, why = o.next_due(now, latest(now), None, WORK, CFG, no_progress=1, last_end=now - 60)
-        self.assertEqual(due, now - 60 + 30 * 60)
+        self.assertEqual((due, why), (now - 60 + 30 * 60, "retry (no progress last time)"))
         due, _ = o.next_due(now, latest(now), None, WORK, CFG, no_progress=5, last_end=now - 60)
         self.assertEqual(due, now - 60 + 2 * H)
-
-    def test_outside_active_hours_moves_to_window_start(self):
-        now = ts("23:45")
-        cfg = CFG | {"active_start": "07:00", "active_end": "23:30"}
-        self.assertEqual(o.next_due(now, latest(now), None, WORK, cfg)[0], ts("07:00", 16))
 
     def test_stale_village_triggers_health_check(self):
         now = ts("12:00")
         due, why = o.next_due(now, latest(now, free=0, captured_ago=13 * H), None, NO_WORK, CFG)
-        self.assertEqual((due, why), (now, "health check"))
+        self.assertEqual((due, why), (now - 1 * H, "health check"))
 
 
 class FakeProc:
@@ -139,6 +142,33 @@ class TickTest(unittest.TestCase):
         self.orc.tick()
         self.assertEqual([t for t, _ in self.spawned], ["manual"])
         self.assertEqual(self.store.pending_commands(), [])
+
+    def test_overdue_session_starts_despite_jitter(self):
+        # Regression 2026-11-17: an overdue health check never started because
+        # the jitter was re-drawn every tick against a "due" that moved.
+        self.store.set_setting("jitter_min", 5)
+        snap = latest(self.now[0], free=0, captured_ago=13 * H)
+        self.store.save_snapshot(snap.snapshot, captured_at=snap.captured_at)
+        started = False
+        for _ in range(20):                       # 20 ticks of 20 s > 5 min jitter
+            self.orc.tick()
+            if self.spawned:
+                started = True
+                break
+            self.now[0] += 20
+        self.assertTrue(started)
+        self.assertEqual(self.spawned[0][0], "health check")
+
+    def test_outside_active_hours_waits_for_the_window(self):
+        self.store.set_setting("active_start", "07:00")
+        self.store.set_setting("active_end", "23:30")
+        self.now[0] = ts("23:45")
+        state = self.orc.tick()                   # first look is due, but not now
+        self.assertEqual(self.spawned, [])
+        self.assertEqual(state["next_due"], ts("07:00", 16))
+        self.now[0] = ts("07:00", 16) + 1
+        self.orc.tick()
+        self.assertEqual(len(self.spawned), 1)
 
     def test_session_end_and_timeout(self):
         self.orc.tick()

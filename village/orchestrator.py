@@ -54,19 +54,31 @@ def next_active_start(ts, start, end):
 
 
 def next_due(now, latest, gamedata, has_work, cfg, no_progress=0, last_end=None):
-    """(due_ts, reason). `latest` is the StoredSnapshot or None; `has_work`
-    is a function(snapshot) -> bool (does the queue have a candidate?)."""
+    """(due_ts, reason): the moment a session became (or becomes) due.
+
+    The value is STABLE: when it is in the past it stays at that past moment
+    (when the builder was seen free, capture time + health interval, ...),
+    it is never clamped to `now`. Live 2026-11-17: clamping made "due"
+    change every tick, the jitter was re-drawn every tick, and an overdue
+    session never started. Active hours are applied by the caller."""
     if latest is None:
-        return now, "first look at the village"
+        return 0, "first look at the village"
     snap = latest.snapshot
     options = []
     f = forecast(snap, gamedata, latest.counter)
     if has_work(snap):
         if f.free(now) > 0:
-            due = now
+            if f.free(latest.captured_at) > 0:
+                due = latest.captured_at                 # seen free at the last capture
+            else:
+                due = min((j.ends_at for j in f.jobs if j.ends_at <= now),
+                          default=latest.captured_at)
+            reason = "builder free"
             if no_progress and last_end:
-                due = max(now, last_end + BACKOFF[min(no_progress, len(BACKOFF)) - 1])
-            options.append((due, "builder free" if due == now else "retry (no progress last time)"))
+                retry = last_end + BACKOFF[min(no_progress, len(BACKOFF)) - 1]
+                if retry > due:
+                    due, reason = retry, "retry (no progress last time)"
+            options.append((due, reason))
         else:
             ends = sorted(j.ends_at for j in f.jobs if j.ends_at > now)
             if ends:
@@ -74,11 +86,8 @@ def next_due(now, latest, gamedata, has_work, cfg, no_progress=0, last_end=None)
                 group = [e for e in ends if e <= ends[0] + window]
                 options.append((group[-1], f"{len(group)} builder(s) free"
                                 if len(group) > 1 else "builder free"))
-    health = latest.captured_at + cfg["health_check_hours"] * 3600
-    options.append((max(now, health), "health check"))
-    due, reason = min(options)
-    due = next_active_start(due, cfg["active_start"], cfg["active_end"])
-    return due, reason
+    options.append((latest.captured_at + cfg["health_check_hours"] * 3600, "health check"))
+    return min(options)
 
 
 class Orchestrator:
@@ -141,8 +150,8 @@ class Orchestrator:
         due, reason = next_due(self.clock(), latest, gd, self._has_work(gd, cfg) if gd else
                                (lambda s: False), cfg, self.store.kv_get("no_progress", 0),
                                last.get("ended_at"))
-        key = int(due)
-        if key not in self._jitter:
+        key = (int(due), reason)
+        if key not in self._jitter:                  # drawn once per due moment
             self._jitter = {key: random.uniform(0, cfg["jitter_min"] * 60)}
         return due + self._jitter[key], reason, cfg
 
@@ -162,7 +171,8 @@ class Orchestrator:
                 self.store.finish_command(cmd["id"], "unknown command")
         due, reason, cfg = self.compute()
         state["paused"] = bool(cfg["automation_paused"])
-        if self.proc is None and not state["paused"] and due <= now:
+        active = in_active_hours(now, cfg["active_start"], cfg["active_end"])
+        if self.proc is None and not state["paused"] and due <= now and active:
             from .capture import is_capture_running
             if is_capture_running():
                 reason += " (waiting: the game is busy, e.g. a farming run)"
@@ -171,7 +181,10 @@ class Orchestrator:
         if self.current:
             state["running"] = {"trigger": self.current[0], "since": self.current[1]}
         if not state["paused"]:
-            state["next_due"], state["next_reason"] = due, reason
+            # For display: when it will actually start (active hours applied).
+            state["next_due"] = next_active_start(max(due, now), cfg["active_start"],
+                                                  cfg["active_end"])
+            state["next_reason"] = reason
         self.store.kv_set("orchestrator", state)
         return state
 
