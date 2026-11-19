@@ -120,3 +120,28 @@ def read_builder_counter(img_bgr):
         digits.append(int(d))
     free, total = digits
     return (free, total) if 0 <= free <= total and total > 0 else None
+
+
+# Since game 19.32 a gem-paid Goblin Builder is counted in "free/total" and
+# its face replaces the builder's on the counter (live 2026-11-19: "1/7"
+# with all 6 real builders busy; Confirm then opened a gem offer).
+GOBLIN_ICON_REGION = (1380, 600, 220, 120)    # x, y, w, h around the counter's icon
+_goblin_tpl = None
+
+
+def counter_shows_goblin(img_bgr):
+    global _goblin_tpl
+    if _goblin_tpl is None:
+        _goblin_tpl = cv2.imread(os.path.join(_REPO, "misc", "counter_goblin.png"), cv2.IMREAD_COLOR)
+    x, y, w, h = GOBLIN_ICON_REGION
+    res = cv2.matchTemplate(img_bgr[y:y + h, x:x + w], _goblin_tpl, cv2.TM_CCOEFF_NORMED)
+    return cv2.minMaxLoc(res)[1] >= 0.85
+
+
+def read_real_builder_counter(img_bgr):
+    """(free, total) counting real builders only: with the Goblin icon shown,
+    one of the "free" builders is the gem-paid Goblin Builder."""
+    c = read_builder_counter(img_bgr)
+    if c is None or not counter_shows_goblin(img_bgr):
+        return c
+    return max(0, c[0] - 1), max(0, c[1] - 1)

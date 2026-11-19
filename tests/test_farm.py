@@ -104,6 +104,12 @@ class LoopTest(unittest.TestCase):
         self.assertEqual((status, n), ("done", 3))
         self.assertTrue(any("boom" in r.get("message", "") for r in reports))
 
+    def test_abort_ends_the_run_without_counting_a_failure(self):
+        (status, msg), n, reports = self.run_loop(P(mode="attacks", attacks=5),
+                                                  [True, farm.Abort("desktop gone")])
+        self.assertEqual((status, msg, n), ("failed", "desktop gone", 2))
+        self.assertEqual(reports[-1]["fails"], 0)
+
     def test_walls_every_n_attacks(self):
         done = []
         (status, _), n, reports = self.run_loop(P(mode="attacks", attacks=4, walls=True, wall_every=2),

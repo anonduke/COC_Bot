@@ -26,7 +26,14 @@ from .home import ensure_home
 
 LDCONSOLE = os.path.join(adb.LDPLAYER_DIR, "ldconsole.exe")
 INDEX = "0"
-AD_CLASSES = ("adframe", "ADFullScreenFrame")
+# LDLDBroadScreenWndIE: a 264 px ad panel LDPlayer docks to the right of the
+# window (seen 2026-11-19); it pushed the window to (0, 0) and resized it.
+AD_CLASSES = ("adframe", "ADFullScreenFrame", "LDLDBroadScreenWndIE")
+
+# Ranked_Copy / wall.py were calibrated with the game picture at exactly this
+# screen rectangle (x, y, w, h); their clicks and templates depend on it.
+RENDER_TARGET = (85, 44, 1196, 673)
+WINDOW_POS = (84, 10)
 BOOT_TIMEOUT = 180
 
 
@@ -84,6 +91,45 @@ def ld_running():
 def _processes_gone(names=("Ld9BoxHeadless.exe", "VBoxNetNAT.exe")):
     out = subprocess.run(["tasklist"], capture_output=True, text=True, timeout=30).stdout.lower()
     return not any(n.lower() in out for n in names)
+
+
+def _rect(hwnd):
+    r = wintypes.RECT()
+    ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(r))
+    return (r.left, r.top, r.right - r.left, r.bottom - r.top)
+
+
+def fit_window(log=print):
+    """Put the game picture back at RENDER_TARGET: hide LDPlayer's ad panels,
+    restore the window and size it so the picture lands there. LDPlayer
+    centres the picture (with or without its right toolbar), so the width is
+    adjusted from the measured result. Returns True when it fits."""
+    user32 = ctypes.windll.user32
+    main = user32.FindWindowW("LDPlayerMainFrame", None)
+    if not main:
+        return False
+    render = user32.FindWindowExW(main, None, "RenderWindow", None)
+    if not render:
+        return False
+    hide_ad_windows()
+    if _rect(render) == RENDER_TARGET:
+        return True
+    before = _rect(main)
+    tx, ty, tw, th = RENDER_TARGET
+    width, height = tw + 40, th + 35          # first guess: the old layout
+    user32.ShowWindow(main, 9)                 # SW_RESTORE (in case maximised)
+    for _ in range(4):
+        user32.SetWindowPos(main, 0, WINDOW_POS[0], WINDOW_POS[1], width, height,
+                            0x0004 | 0x0010)  # SWP_NOZORDER | SWP_NOACTIVATE
+        time.sleep(1.5)
+        x, y, w, h = _rect(render)
+        if (x, y, w, h) == RENDER_TARGET:
+            log(f"LDPlayer window fitted: {before} -> {_rect(main)}")
+            return True
+        width += (tw - w) - 2 * (x - tx)       # correct size and centring offset
+        height += th - h
+    log(f"could not fit the LDPlayer window (render {_rect(render)}, want {RENDER_TARGET})")
+    return False
 
 
 def start(log=print, serial=adb.SERIAL, _retry=True):
@@ -159,6 +205,7 @@ def _ready_once(log, serial):
     if picture_frozen(serial):
         raise EmulatorError("the game picture is frozen")
     hide_ad_windows()
+    fit_window(log)
 
 
 def ensure_ready(log=print, serial=adb.SERIAL):

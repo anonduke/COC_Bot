@@ -32,7 +32,7 @@ import cv2
 from . import adb, clipboard
 from .export import ExportError, parse_export
 from .home import ensure_home
-from .resources import read_builder_counter, read_resources
+from .resources import read_real_builder_counter, read_resources
 from .store import Resources
 
 MORE_SETTINGS_LINK = "https://link.clashofclans.com/en/?action=OpenMoreSettings"
@@ -200,7 +200,7 @@ def _capture_export(expected_tag, max_age, serial, log, screen_dir):
     captured_at = time.time()
     home = adb.screencap(serial)
     resources = read_resources(home)
-    counter = read_builder_counter(home)
+    counter = read_real_builder_counter(home)
     if screen_dir:
         os.makedirs(screen_dir, exist_ok=True)
         cv2.imwrite(os.path.join(screen_dir, time.strftime("home_%Y%m%d_%H%M%S.png")), home)

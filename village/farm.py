@@ -20,12 +20,18 @@ Ranked_Copy drives the real mouse on the LDPlayer window (pyautogui), so the
 window must be visible and the PC not in use while farming.
 """
 import json
+import logging
 import os
 import sys
 import time
 import traceback
 
 MODES = ("full", "attacks", "target")
+DESKTOP_WAIT = 15 * 60      # how long a run waits for the desktop to come back
+
+
+class Abort(Exception):
+    """Stop the whole run now (not counted as a failed attack)."""
 FULL_CHOICES = ("gold", "elixir", "both", "any")
 MAX_FAILS_IN_A_ROW = 6
 DEFAULTS = {"mode": "full", "full": "both", "attacks": 10, "gold": None, "elixir": None,
@@ -125,6 +131,8 @@ def run_loop(p, attack, read_state, stop_requested, report, upgrade_walls=None,
             return "failed", f"{in_a_row} attacks in a row failed"
         try:
             ok = bool(attack())
+        except Abort as e:
+            return "failed", str(e)
         except Exception as e:  # noqa: BLE001 - one bad attack must not end the run
             ok = False
             report(message=f"attack raised {type(e).__name__}: {e}")
@@ -194,14 +202,32 @@ def run(run_id):
             import Ranked_Copy as R
             # Ranked_Copy's own focus routine can't get past Windows' foreground
             # lock from a background process; use the ALT-key workaround.
-            from . import winfocus
+            from . import emulator, winfocus
             R._force_foreground = lambda win, tries=3: winfocus.bring_to_front(win._hWnd, tries)
+            def wait_for_desktop():
+                problem = winfocus.desktop_problem()
+                if not problem:
+                    return
+                end = time.time() + DESKTOP_WAIT
+                while problem and time.time() < end:
+                    report(message="waiting: " + problem)
+                    if stop_requested():
+                        raise Abort("stopped from the dashboard while waiting: " + problem)
+                    time.sleep(15)
+                    problem = winfocus.desktop_problem()
+                if problem:
+                    raise Abort(f"gave up after {DESKTOP_WAIT // 60} min: " + problem)
+                report(message="desktop OK again: farming")
+
+            wait_for_desktop()
+            if not emulator.fit_window(lambda m: logging.warning(f"[FARM] {m}")):
+                raise RuntimeError("the LDPlayer window could not be put back to the size "
+                                   "the attack code needs (1196x673 game picture at 85,44)")
             R.CONFIG["ranked_mode"] = p["ranked"]
             R.CONFIG["event_troops"] = p["event_troops"]
             R.cleanup_session()
             # Keep this run's evidence: Ranked_Copy's log and, for every failed
             # attack, a screenshot plus the window that had the foreground.
-            import logging
             import pyautogui
             run_dir = os.path.join(repo, "data", "farm_runs", f"run_{run_id}")
             os.makedirs(run_dir, exist_ok=True)
@@ -229,6 +255,10 @@ def run(run_id):
                     return "?"
 
             def attack():
+                wait_for_desktop()
+                # LDPlayer can re-dock its ad panel and move/resize the window
+                # at any time (live 2026-11-19); refit before every attack.
+                emulator.fit_window(lambda m: logging.warning(f"[FARM] {m}"))
                 R._update_heartbeat()
                 try:
                     ok = R.attack()
@@ -258,6 +288,8 @@ def run(run_id):
                 monitor_stop.set()
                 logging.getLogger().removeHandler(fh)
                 fh.close()
+    except Abort as e:
+        status, message = "failed", str(e)
     except CaptureError as e:
         status, message = "failed", f"could not start: {e}"
     except Exception as e:  # noqa: BLE001

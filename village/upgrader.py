@@ -44,7 +44,7 @@ import numpy as np
 from . import adb
 from .capture import capture_lock
 from .home import ensure_home, is_home
-from .resources import read_builder_counter
+from .resources import read_real_builder_counter
 
 _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _MISC = os.path.join(_REPO, "misc")
@@ -84,6 +84,7 @@ class DryRun:
     affordable: bool | None = None    # False: price shown in red
     confirm_tapped: bool = False
     confirmed: bool = False           # dialog closed after Confirm (verify by export!)
+    goblin_offer: bool = False        # Confirm opened the Goblin Builder gem offer
     reason: str = ""
     screenshots: list = field(default_factory=list)
     rows_opened: list = field(default_factory=list)   # (row text, dialog title)
@@ -353,6 +354,21 @@ CONFIRM_TAP = (1120, 790)            # middle of that button (label + price)
 KEYCODE_BACK = 4
 
 
+HEY_CHIEF_POS = (1000, 178)          # misc/hey_chief.png: "all your Builders are busy" gem offer
+
+
+def popup_after_confirm(img):
+    """Why the frame after Confirm is NOT a plain success, or None.
+    Live 2026-11-19 the Goblin Builder gem offer showed up with the Builder
+    panel still visible behind it and was taken for success."""
+    if _at(img, "hey_chief.png", HEY_CHIEF_POS):
+        return "the game offered the gem-paid Goblin Builder (no real builder free)"
+    res = cv2.matchTemplate(img, _template("dialog_close_x.png"), cv2.TM_CCOEFF_NORMED)
+    if cv2.minMaxLoc(res)[1] >= 0.9:
+        return "a popup with a close button is open"
+    return None
+
+
 def confirm_checks(img, name, want):
     """Why Confirm must NOT be tapped on this frame ([] = all checks pass).
     Everything is checked on the one frame the tap is based on."""
@@ -398,19 +414,21 @@ def _confirm(result, name, want, serial, log, shot_dir):
         close_dialog(serial, log)
         result.reason = "Confirm tap did not register; dialog closed, nothing spent"
         return
-    if panel_open(after) or is_home(after):
+    popup = popup_after_confirm(after)
+    if not popup and (panel_open(after) or is_home(after)):
         result.confirmed = True
         result.reason = "confirmed (dialog closed); to be verified by export"
         return
-    # Something else popped up: back out without touching it.
+    # Something else popped up (a gem offer): back out without touching it.
     for _ in range(3):
         adb.shell(f"input keyevent {KEYCODE_BACK}", serial=serial)
         time.sleep(1.5)
         img = adb.screencap(serial)
         if panel_open(img) or is_home(img):
             break
-    result.reason = ("an unexpected popup followed Confirm (e.g. a gem offer); dismissed "
-                     "with BACK, nothing tapped in it; see the after_confirm screenshot")
+    result.reason = ((popup or "an unexpected screen followed Confirm")
+                     + "; dismissed with BACK, nothing tapped in it; see the after_confirm screenshot")
+    result.goblin_offer = bool(popup and "Goblin" in popup)
 
 
 # --- find, then dry run or confirm ------------------------------------------------
@@ -437,10 +455,10 @@ def _run(name, from_level, serial, log, shot_dir, confirm):
         result.reason = "could not reach the home screen"
         return result
     if confirm:
-        counter = read_builder_counter(adb.screencap(serial))
+        counter = read_real_builder_counter(adb.screencap(serial))
         if not counter or counter[0] < 1:
             # Confirm with no free builder opens a gem-priced Goblin Builder offer.
-            result.reason = f"no free builder on the counter ({counter})"
+            result.reason = f"no free (real) builder on the counter ({counter})"
             return result
 
     # The counter was just read on the home screen by ensure_home.

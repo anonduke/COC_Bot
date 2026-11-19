@@ -138,6 +138,15 @@ class ConfirmChecksTest(unittest.TestCase):
         self.assertTrue(any("Confirm" in p for p in u.confirm_checks(img, "Wizard Tower", 9)))
 
 
+class AfterConfirmTest(unittest.TestCase):
+    def test_goblin_offer_is_not_success(self):
+        img = screen("goblin_offer.png", 730, 150)
+        self.assertIn("Goblin", u.popup_after_confirm(img))
+
+    def test_plain_panel_is_fine(self):
+        self.assertIsNone(u.popup_after_confirm(screen("panel_top.png", 1170, 0)))
+
+
 class DryRunNeverConfirmsTest(unittest.TestCase):
     def test_dry_run_passes_confirm_false(self):
         calls = []

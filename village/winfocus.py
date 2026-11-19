@@ -54,3 +54,39 @@ def bring_to_front(hwnd, tries=3):
 def find_ldplayer():
     """hwnd of the LDPlayer main window, or None."""
     return user32.FindWindowW("LDPlayerMainFrame", None) or None
+
+
+# The game window must fit on screen at its calibrated place and size, and
+# pyautogui's coordinates must be real pixels (100 % display scaling).
+MIN_SCREEN = (1282, 718)      # window at (84, 10), 1198 x 708
+
+
+def desktop_problem():
+    """Why mouse-driven attacks can't run right now, or None if they can.
+    Checks: the desktop is drawn (not locked, Remote Desktop not minimized
+    or disconnected), the screen is big enough, display scaling is 100 %.
+    Remote Desktop sets the resolution from the connecting device, so it
+    can change between connections."""
+    import pyautogui
+    try:
+        pyautogui.screenshot(region=(0, 0, 8, 8))
+    except Exception:  # noqa: BLE001
+        return ("the Windows desktop is not visible (Remote Desktop minimized or "
+                "disconnected, or the PC is locked)")
+    w, h = user32.GetSystemMetrics(0), user32.GetSystemMetrics(1)
+    if w < MIN_SCREEN[0] or h < MIN_SCREEN[1]:
+        return (f"the screen is {w}x{h}; the game window needs at least "
+                f"{MIN_SCREEN[0]}x{MIN_SCREEN[1]} (Remote Desktop: connect at 1366x768 or larger)")
+    dc = user32.GetDC(0)
+    try:
+        dpi = ctypes.windll.gdi32.GetDeviceCaps(dc, 88)     # LOGPIXELSX
+    finally:
+        user32.ReleaseDC(0, dc)
+    if dpi != 96:
+        return (f"display scaling is {round(dpi / 96 * 100)} %; the attack code needs 100 % "
+                "(Settings > Display > Scale)")
+    return None
+
+
+def desktop_usable():
+    return desktop_problem() is None

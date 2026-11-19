@@ -503,6 +503,9 @@ class Handler(BaseHTTPRequestHandler):
         from .capture import is_capture_running
         st = dict(self.watch.status) if self.watch else {"state": "unknown"}
         st["capture_running"] = is_capture_running()
+        from .winfocus import desktop_problem
+        st["desktop_problem"] = desktop_problem()
+        st["desktop_usable"] = st["desktop_problem"] is None
         return st
 
     def do_GET(self):

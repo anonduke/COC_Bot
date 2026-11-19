@@ -128,6 +128,8 @@ function renderStatus() {
   const running = st?.capture_running;
   btn.disabled = !!running;
   btn.querySelector("span").textContent = running ? "Capturing…" : "Capture now";
+  $("#desktop-warn").classList.toggle("hidden", !st || st.desktop_usable !== false);
+  if (st?.desktop_problem) $("#desktop-why").textContent = st.desktop_problem;
 }
 $("#btn-capture").addEventListener("click", async () => {
   try {

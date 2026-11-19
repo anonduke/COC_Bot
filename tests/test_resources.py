@@ -6,7 +6,8 @@ import numpy as np
 
 from tests.helpers import FIXTURES
 from village.home import is_home
-from village.resources import BUILDER_COUNTER, REGIONS, read_builder_counter, read_resources
+from village.resources import (BUILDER_COUNTER, REGIONS, read_builder_counter,
+                                read_real_builder_counter, read_resources)
 from village.store import Resources
 
 # Crops of live 1600x900 home screenshots (2026-11-14), pasted back at their
@@ -53,6 +54,13 @@ class BuilderCounterTest(unittest.TestCase):
     def test_dimmed_or_missing_counter(self):
         self.assertIsNone(read_builder_counter((home_screen() * 0.4).astype(np.uint8)))
         self.assertIsNone(read_builder_counter(np.zeros((900, 1600, 3), np.uint8)))
+
+    def test_goblin_builder_is_not_a_real_free_builder(self):
+        # 2026-11-19: "1/7" with a Goblin face = the gem-paid Goblin Builder.
+        goblin = home_screen(((("home_counter_goblin.png"), (1380, 600)),))
+        self.assertEqual(read_builder_counter(goblin), (1, 7))
+        self.assertEqual(read_real_builder_counter(goblin), (0, 6))
+        self.assertEqual(read_real_builder_counter(home_screen()), (1, 7))   # normal icon
 
     def test_is_home_needs_counter_and_gold(self):
         self.assertTrue(is_home(home_screen()))
