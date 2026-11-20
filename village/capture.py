@@ -59,6 +59,14 @@ class CaptureError(RuntimeError):
     pass
 
 
+class TagMismatch(CaptureError):
+    """The game is on another account than expected."""
+
+    def __init__(self, found, expected):
+        super().__init__(f"export is for {found}, expected {expected}")
+        self.found, self.expected = found, expected
+
+
 @dataclass
 class Capture:
     text: str                 # the export JSON as copied
@@ -265,7 +273,7 @@ def _capture_export(expected_tag, max_age, serial, log, screen_dir):
         except ExportError as e:
             raise CaptureError(f"clipboard is not an export: {e}") from e
         if expected_tag and snap.tag != expected_tag:
-            raise CaptureError(f"export is for {snap.tag}, expected {expected_tag}")
+            raise TagMismatch(snap.tag, expected_tag)
         age = time.time() - snap.timestamp
         if abs(age) > max_age:
             raise CaptureError(f"export timestamp is {age:.0f}s off from now")

@@ -154,18 +154,55 @@ class BasicWebTest(WebTest):
 
     def test_player_profile(self):
         s = Store(self.db)
-        s.kv_set("player", {"name": "Other", "clan": None, "xp": 5, "tag": "#ELSEWHERE"})
-        self.assertEqual(self.api("/api/state")[1]["player"]["name"], None)   # other village
+        s.kv_set("player:#ELSEWHERE", {"name": "Other", "clan": None, "xp": 5, "tag": "#ELSEWHERE"})
+        self.assertNotEqual(self.api("/api/state")[1]["player"]["name"], "Other")   # other village
         snap = parse_export(export_text(load_raw()))
         s.save_snapshot(snap, player={"name": "RAHMAN -iv", "clan": "phenomenal", "xp": 196})
         s.close()
         p = self.api("/api/state")[1]["player"]
         self.assertEqual((p["name"], p["clan"], p["xp"]), ("RAHMAN -iv", "phenomenal", 196))
-        self.assertEqual(self.api("/api/settings", {"player_name": " RAHMAN - IV "})[0], 200)
+        self.assertEqual(self.api("/api/accounts/update",
+                                  {"tag": "#TESTTAG", "display_name": " RAHMAN - IV "})[0], 200)
         p = self.api("/api/state")[1]["player"]
         self.assertEqual((p["name"], p["read_name"]), ("RAHMAN - IV", "RAHMAN -iv"))
-        self.assertEqual(self.api("/api/settings", {"player_name": "x" * 31})[0], 400)
-        self.assertEqual(self.api("/api/settings", {"player_name": ""})[0], 200)
+        self.assertEqual(self.api("/api/accounts/update", {"tag": "#TESTTAG", "display_name": "x" * 31})[0], 400)
+        self.assertEqual(self.api("/api/accounts/update", {"tag": "#NOPE", "display_name": "x"})[0], 400)
+        self.assertEqual(self.api("/api/accounts/update", {"tag": "#TESTTAG", "display_name": ""})[0], 200)
+
+    def test_day_ago_comparison_stays_in_the_account(self):
+        raw = load_raw()
+        raw["tag"], raw["timestamp"] = "#OTHERACCT", raw["timestamp"] - 30 * 3600
+        s = Store(self.db)
+        s.save_snapshot(parse_export(json.dumps(raw)), Resources(999, 999, 999, 999))
+        s.close()
+        st = self.api("/api/state")[1]
+        self.assertEqual(st["snapshot"]["tag"], "#TESTTAG")
+        self.assertIsNone(st["resources_before"])        # not the other account's numbers
+        self.assertNotIn(999, [p["gold"] for p in self.api("/api/history?hours=1000")[1]["points"]])
+
+    def test_accounts(self):
+        status, a = self.api("/api/accounts")
+        self.assertEqual((status, a["active"]), (200, "#TESTTAG"))
+        me = next(x for x in a["accounts"] if x["tag"] == "#TESTTAG")
+        self.assertTrue(me["active"] and me["can_switch"])
+        self.assertEqual(self.api("/api/accounts/switch", {"tag": "#NOPE"})[0], 400)
+        s = Store(self.db)
+        s.upsert_account("#OTHER")                        # Supercell ID name unknown
+        s.close()
+        status, body = self.api("/api/accounts/switch", {"tag": "#OTHER"})
+        self.assertEqual(status, 409)
+        self.assertIn("Find accounts", body["error"])
+        s = Store(self.db)
+        s.kv_set("account_job", {"state": "running", "pid": os.getpid(), "started_at": 2_000_000_000,
+                                 "steps": []})
+        s.upsert_account("#OTHER", scid="Other")
+        s.close()
+        self.assertEqual(self.api("/api/accounts/switch", {"tag": "#OTHER"})[0], 409)   # busy
+        self.assertEqual(self.api("/api/accounts/discover", {})[0], 409)
+        s = Store(self.db)
+        s.kv_set("account_job", {"state": "running", "pid": 0, "started_at": 0, "steps": []})
+        s.close()
+        self.assertEqual(self.api("/api/accounts")[1]["job"]["state"], "failed")      # dead job
 
     def test_artwork_is_served_and_cached(self):
         with urllib.request.urlopen(self.base + "/img/th_18.png", timeout=10) as r:
@@ -197,11 +234,12 @@ class BasicWebTest(WebTest):
         self.assertEqual(ctx.exception.code, 400)
 
     def test_settings_round_trip_and_validation(self):
-        self.assertEqual(self.api("/api/settings", {"jitter_min": 7, "player_tag": "#abc123"})[0], 200)
+        self.assertEqual(self.api("/api/settings", {"jitter_min": 7})[0], 200)
         values = {s["key"]: s["value"] for s in self.api("/api/settings")[1]["settings"]}
-        self.assertEqual((values["jitter_min"], values["player_tag"]), (7, "#ABC123"))
+        self.assertEqual(values["jitter_min"], 7)
+        self.assertNotIn("player_tag", values)          # changed by switching accounts only
         for bad in ({"jitter_min": 999}, {"jitter_min": True}, {"active_start": "25:00"},
-                    {"nope": 1}, {"automation_paused": "yes"}, {"player_tag": "abc"}):
+                    {"nope": 1}, {"automation_paused": "yes"}, {"player_tag": "#ABC123"}):
             with self.subTest(bad=bad):
                 self.assertEqual(self.api("/api/settings", bad)[0], 400)
 

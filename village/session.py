@@ -197,7 +197,7 @@ def run_session(store, game, trigger, log=print, max_steps=10):
         log(traceback.format_exc())
     summary = "\n".join(out.lines)
     store.end_session(sid, out.status, summary)
-    store.kv_set("last_session", {"id": sid, "status": out.status, "upgrades": out.upgrades,
+    store.kv_set(store.akey("last_session"), {"id": sid, "status": out.status, "upgrades": out.upgrades,
                                   "ended_at": int(time.time()), "trigger": trigger})
     if out.status != "done":
         store.notify("error", "session", f"Session #{sid} ({trigger}) failed", summary)
@@ -209,10 +209,10 @@ def run_session(store, game, trigger, log=print, max_steps=10):
 # --- real game wiring ------------------------------------------------------------
 
 def real_game(store, log=print):
-    from . import adb, capture, emulator, farm, gamedata, upgrader
+    from . import accounts, adb, capture, emulator, farm, gamedata, upgrader
     from .resources import bar_fill
 
-    tag = effective(store)["player_tag"] or None
+    tag = store.active_tag()
     game = Game(ensure_ready=None, capture=None, upgrade=None, farm=None)
 
     def ready():
@@ -221,7 +221,9 @@ def real_game(store, log=print):
             game.gamedata = gamedata.ensure_static_data()
 
     def do_capture():
-        cap = capture.capture_export(expected_tag=tag, log=log)
+        # On another account (switched by hand)? capture_for switches back.
+        cap = (accounts.capture_for(store, tag, log) if tag
+               else capture.capture_export(log=log))
         img = adb.screencap()   # back on the home screen: read the storage bars
         cap.fills = {"gold_fill": bar_fill(img, "gold"), "elixir_fill": bar_fill(img, "elixir"),
                      "dark_fill": bar_fill(img, "dark_elixir")}
@@ -249,6 +251,7 @@ def main(trigger):
     from .power import keep_display_on
     from .store import Store
     store = Store()
+    store.pin()       # one account for the whole session, whatever the dashboard does
     with capture_lock(wait=60), keep_display_on():
         sid, out = run_session(store, real_game(store), trigger,
                                log=lambda m: print(m, flush=True))

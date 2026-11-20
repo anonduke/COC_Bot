@@ -28,6 +28,20 @@
   <main class="main">
     <div class="topbar">
       <h1 id="page-title">Dashboard</h1>
+      <div class="acct-wrap">
+        <button class="acct-btn" id="acct-btn" aria-haspopup="true" aria-expanded="false" title="Switch game account">
+          <img id="acct-img" src="/img/builder.png" alt="">
+          <span class="acct-text"><b id="acct-name">Account</b><small id="acct-sub">loading…</small></span>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" width="16" height="16"><path d="M6 9l6 6 6-6"/></svg>
+        </button>
+        <div class="acct-menu hidden" id="acct-menu" role="menu">
+          <div class="acct-menu-head">Game accounts <span class="muted">· each keeps its own queue, sessions and history</span></div>
+          <div id="acct-list"></div>
+          <div class="acct-menu-foot">
+            <button class="btn small" id="acct-discover" title="Reads the Supercell ID account list in the game and learns any new account (switches to it once, then back)">Find accounts in the game</button>
+          </div>
+        </div>
+      </div>
       <span class="spacer"></span>
       <span class="pill" id="pill-emulator" title="Emulator state, checked every 20 s"><span class="dot"></span><span>Emulator…</span></span>
       <span class="pill" id="pill-auto" data-goto="automation" style="cursor:pointer" title="Automation status"><span class="dot"></span><span>Automation…</span></span>
@@ -255,6 +269,17 @@
   </main>
 </div>
 <div class="tooltip hidden" id="tooltip" role="tooltip"></div>
+<div class="switch-overlay hidden" id="switch-overlay" role="dialog" aria-modal="true" aria-labelledby="sw-title">
+  <div class="switch-card">
+    <div class="sw-art"><img id="sw-img" src="/img/builder.png" alt=""></div>
+    <h2 id="sw-title">Switching account</h2>
+    <div class="sw-sub" id="sw-sub"></div>
+    <div class="sw-bar"><i id="sw-bar"></i></div>
+    <ol class="sw-steps" id="sw-steps"></ol>
+    <div class="sw-foot"><span class="muted num" id="sw-elapsed"></span>
+      <button class="btn small hidden" id="sw-close">Close</button></div>
+  </div>
+</div>
 <div class="toasts" id="toasts" aria-live="polite"></div>
 <script src="/app.js"></script>
 </body>

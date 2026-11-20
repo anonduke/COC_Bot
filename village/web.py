@@ -20,8 +20,8 @@ from urllib.parse import parse_qs, urlparse
 from . import adb, gamedata
 from .builders import BUILDERS_HUT, LABORATORY, PET_HOUSE, WORKERS, forecast
 from .catalog import HERO_HALL, TOWN_HALL, WORKER_NAMES, cap, catalog, preview, step
-from .settings import SETTINGS, effective, validate
-from .store import Store
+from .settings import SETTINGS, validate
+from .store import Store, test_key
 
 PREVIEW_STEPS = 600   # queue steps simulated for the preview
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
@@ -98,12 +98,12 @@ def _job_dict(gd, j, kind):
 
 
 def player_payload(store, snap):
-    """Name (setting first, else read from the game screen), clan, XP level."""
-    seen = store.kv_get("player") or {}
-    if seen.get("tag") not in (None, snap.tag):
-        seen = {}
-    name = (effective(store).get("player_name") or "").strip()
-    return {"name": name or seen.get("name"), "read_name": seen.get("name"),
+    """Name (the account's display name first, else read from the game
+    screen), clan, XP level."""
+    seen = store.kv_get(store.akey("player", snap.tag)) or {}
+    acct = store.account(snap.tag) or {}
+    name = (acct.get("display_name") or "").strip()
+    return {"name": name or seen.get("name") or acct.get("village"), "read_name": seen.get("name"),
             "clan": seen.get("clan"), "xp": seen.get("xp"), "tag": snap.tag}
 
 
@@ -130,8 +130,8 @@ def state_payload(store):
     # Resource change versus about a day earlier (nearest snapshot with values).
     day_ago = store.db.execute(
         "SELECT gold, elixir, dark_elixir, gems, export_ts FROM snapshots "
-        "WHERE export_ts <= ? AND gold IS NOT NULL ORDER BY export_ts DESC LIMIT 1",
-        (snap.timestamp - 20 * 3600,)).fetchone()
+        "WHERE tag = ? AND export_ts <= ? AND gold IS NOT NULL ORDER BY export_ts DESC LIMIT 1",
+        (snap.tag, snap.timestamp - 20 * 3600)).fetchone()
     r = stored.resources
     return {
         "now": now,
@@ -223,12 +223,16 @@ def plan_payload(store):
             "now": now, "truncated": len(planned) >= PREVIEW_STEPS}
 
 
+HIDDEN_SETTINGS = {"player_tag"}   # the active account: changed by switching accounts
+
+
 def settings_payload(store):
     stored = store.settings()
     return {"settings": [{"key": s.key, "group": s.group, "label": s.label, "type": s.type,
                           "help": s.help, "phase": s.phase, "min": s.min, "max": s.max,
                           "default": s.default, "value": stored.get(s.key, s.default),
-                          "custom": s.key in stored} for s in SETTINGS]}
+                          "custom": s.key in stored} for s in SETTINGS
+                         if s.key not in HIDDEN_SETTINGS]}
 
 
 # --- actions ------------------------------------------------------------------
@@ -276,21 +280,103 @@ def start_dryrun(store, body=None):
         raise ApiError(409, f"{item['name']} is already at the highest level available now "
                             f"({item['max_level']}); there is nothing to test")
     result = _start_game_job(["dryrun", "--id", str(data_id)], f"test of {gd.name(data_id)}")
-    store.kv_set(f"test:{data_id}", {"state": "running", "at": int(time.time())})
+    store.kv_set(test_key(store.active_tag(), data_id), {"state": "running", "at": int(time.time())})
     return result
 
 
 def test_results(store):
-    """{data_id: last Test result} for the page."""
-    rows = store.db.execute("SELECT key, value FROM kv WHERE key LIKE 'test:%'").fetchall()
+    """{data_id: last Test result} of the active account, for the page."""
+    prefix = test_key(store.active_tag(), "")
+    rows = store.db.execute("SELECT key, value FROM kv WHERE key LIKE ? || '%'", (prefix,)).fetchall()
     out = {}
     for k, v in rows:
+        if not k[len(prefix):].isdigit():
+            continue
         r = json.loads(v)
         # a test that never reported back (process died) shouldn't spin forever
         if r.get("state") == "running" and time.time() - r.get("at", 0) > 15 * 60:
             r = {"state": "done", "found": False, "reason": "the test did not finish", "at": r["at"]}
-        out[int(k.split(":", 1)[1])] = r
+        out[int(k[len(prefix):])] = r
     return out
+
+
+# --- accounts -------------------------------------------------------------------
+
+JOB_STALE = 15 * 60      # a running account job without progress for this long is dead
+
+
+def accounts_payload(store):
+    from .orchestrator import pid_alive
+    active = store.active_tag()
+    out = []
+    for a in store.accounts():
+        latest = store.latest(tag=a["tag"])
+        seen = store.kv_get(store.akey("player", a["tag"])) or {}
+        th = latest.snapshot.level_of(TOWN_HALL) if latest else a["town_hall"]
+        out.append({"tag": a["tag"], "scid": a["scid"], "village": a["village"],
+                    "display_name": a["display_name"],
+                    "name": a["display_name"] or seen.get("name") or a["village"] or a["scid"] or a["tag"],
+                    "town_hall": th, "xp": seen.get("xp"), "clan": seen.get("clan"),
+                    "synced_at": latest.snapshot.timestamp if latest else None,
+                    "can_switch": bool(a["scid"]) or a["tag"] == active,
+                    "active": a["tag"] == active})
+    job = store.kv_get("account_job")
+    if job and job.get("state") == "running":
+        last = max([job.get("started_at", 0)] + [t for t, _ in job.get("steps", [])])
+        if not pid_alive(job.get("pid")) or time.time() - last > JOB_STALE:
+            job.update(state="failed", step="Failed", ended_at=int(time.time()),
+                       message="the account job stopped without finishing")
+            store.kv_set("account_job", job)
+    return {"active": active, "accounts": out, "job": job, "now": time.time()}
+
+
+def _job_running(store):
+    job = accounts_payload(store)["job"]
+    return bool(job and job.get("state") == "running")
+
+
+def account_switch(store, body):
+    tag = body.get("tag")
+    acct = store.account(tag) if isinstance(tag, str) else None
+    if acct is None:
+        raise ApiError(400, "unknown account")
+    if not acct["scid"] and tag != store.active_tag():
+        raise ApiError(409, "this account's Supercell ID name is not known: use Find accounts first")
+    if _job_running(store):
+        raise ApiError(409, "an account switch is already in progress")
+    if farm_payload(store)["current"]:
+        raise ApiError(409, "a farming run is active: stop it before switching accounts")
+    orch = store.kv_get("orchestrator") or {}
+    if orch.get("running"):
+        raise ApiError(409, "a session is running: switch after it ends")
+    result = _start_game_job(["account", "switch", "--tag", tag], f"switch to {tag}")
+    store.kv_set("account_job", {"kind": "switch", "target": tag, "state": "running",
+                                 "step": "Starting", "steps": [], "started_at": int(time.time()),
+                                 "ended_at": None, "message": "", "pid": _capture_proc.pid})
+    return result
+
+
+def account_discover(store):
+    if _job_running(store):
+        raise ApiError(409, "an account job is already in progress")
+    if farm_payload(store)["current"]:
+        raise ApiError(409, "a farming run is active: stop it first")
+    result = _start_game_job(["account", "discover"], "find accounts")
+    store.kv_set("account_job", {"kind": "discover", "target": None, "state": "running",
+                                 "step": "Starting", "steps": [], "started_at": int(time.time()),
+                                 "ended_at": None, "message": "", "pid": _capture_proc.pid})
+    return result
+
+
+def account_update(store, body):
+    tag = body.get("tag")
+    if not isinstance(tag, str) or store.account(tag) is None:
+        raise ApiError(400, "unknown account")
+    name = body.get("display_name")
+    if name is not None and (not isinstance(name, str) or len(name.strip()) > 30):
+        raise ApiError(400, "display_name: text up to 30 characters")
+    store.upsert_account(tag, display_name=(name or "").strip() or None)
+    return {"ok": True}
 
 
 ORCH_ALIVE = 90        # seconds without an orchestrator heartbeat = not running
@@ -338,9 +424,12 @@ FARM_STALE = 20 * 60   # a running farm with no progress for this long is dead
 
 
 def farm_payload(store):
+    """The active account's runs; `current` is a run of ANY account (the game
+    is busy either way)."""
     runs = store.farm_runs(10)
+    every = store.farm_runs(10, tag=None)
     now = time.time()
-    for r in runs:
+    for r in every:
         if r["status"] in ("queued", "running"):
             last = r["heartbeat_at"] or r["created_at"]
             if now - last > FARM_STALE:
@@ -348,7 +437,10 @@ def farm_payload(store):
                                       message=f"no progress for {FARM_STALE // 60} min "
                                               "(the farming process stopped)")
                 r.update(status="failed", ended_at=int(now))
-    current = next((r for r in runs if r["status"] in ("queued", "running")), None)
+                for mine in runs:
+                    if mine["id"] == r["id"]:
+                        mine.update(status="failed", ended_at=int(now))
+    current = next((r for r in every if r["status"] in ("queued", "running")), None)
     return {"current": current, "runs": runs, "now": now}
 
 
@@ -435,6 +527,8 @@ def settings_update(store, body):
         raise ApiError(400, "send {key: value}")
     clean = {}
     for k, v in body.items():
+        if k in HIDDEN_SETTINGS:
+            raise ApiError(400, "switch accounts with the account menu at the top")
         try:
             clean[k] = validate(k, v)
         except ValueError as e:
@@ -533,6 +627,10 @@ class Handler(BaseHTTPRequestHandler):
                 ("GET", "/api/farm"): lambda: farm_payload(store),
                 ("POST", "/api/farm/start"): lambda: farm_start(store, body),
                 ("POST", "/api/farm/stop"): lambda: farm_stop(store),
+                ("GET", "/api/accounts"): lambda: accounts_payload(store),
+                ("POST", "/api/accounts/switch"): lambda: account_switch(store, body),
+                ("POST", "/api/accounts/discover"): lambda: account_discover(store),
+                ("POST", "/api/accounts/update"): lambda: account_update(store, body),
             }
             handler = routes.get((method, route))
             if handler is None:

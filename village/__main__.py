@@ -18,7 +18,7 @@ import time
 from . import gamedata
 from .builders import forecast, verify_series
 from .power import keep_display_on
-from .store import Store
+from .store import Store, test_key
 
 
 def _fmt_eta(seconds):
@@ -64,18 +64,30 @@ def cmd_static(args):
 
 def cmd_capture(args):
     from . import adb
-    from .capture import CaptureError, capture_export
+    from .capture import CaptureError, TagMismatch, capture_export
     store = None if args.no_save else Store()
     version = adb.game_version()
     gd = _load_gamedata(version)
     ok = matches = checked = 0
+    from .accounts import SwitchError, capture_for
+
+    def capture_one():
+        log = lambda m: print(m, flush=True)  # noqa: E731
+        try:
+            return capture_export(expected_tag=args.tag, screen_dir=args.screens, log=log)
+        except TagMismatch:
+            # The game is on another linked account: switch back to the
+            # expected one when its Supercell ID name is known.
+            if not store or not (store.account(args.tag) or {}).get("scid"):
+                raise
+            return capture_for(store, args.tag, log)
+
     with keep_display_on():
         for i in range(1, args.repeat + 1):
             t0 = time.time()
             try:
-                cap = capture_export(expected_tag=args.tag, screen_dir=args.screens,
-                                     log=lambda m: print(m, flush=True))
-            except (CaptureError, adb.AdbError, OSError) as e:
+                cap = capture_one()
+            except (CaptureError, SwitchError, adb.AdbError, OSError) as e:
                 print(f"[{i}/{args.repeat}] {time.strftime('%H:%M')} FAILED after "
                       f"{time.time() - t0:.0f}s: {e}", flush=True)
                 if store and "already running" not in str(e):
@@ -220,7 +232,7 @@ def next_queue_step(store, gd):
 def _save_test(store, data_id, result):
     """Result of a dashboard "Test" (dry run) for one item, shown on the page."""
     result["at"] = int(time.time())
-    store.kv_set(f"test:{data_id}", result)
+    store.kv_set(test_key(store.active_tag(), data_id), result)
 
 
 def cmd_dryrun(args):
@@ -228,6 +240,7 @@ def cmd_dryrun(args):
     from .capture import CaptureError
     from .upgrader import UpgradeError, dry_run
     store = Store()
+    store.pin()                      # results belong to the account active now
     data_id = args.id
     if data_id:
         from .catalog import SECTIONS, instances, section_of
@@ -269,10 +282,15 @@ def cmd_dryrun(args):
             print("use --queue, or --name NAME --from LEVEL")
             return 2
         name, from_level, worker = args.name, args.from_level, args.worker
+    from .accounts import SwitchError, ensure_account
+    from .capture import capture_lock
     with keep_display_on():
         try:
-            r = dry_run(name, from_level, log=lambda m: print(m, flush=True), worker=worker)
-        except (CaptureError, UpgradeError, adb.AdbError, OSError) as e:
+            with capture_lock(wait=30):
+                if store.active_tag():       # the game may be on another account
+                    ensure_account(store, store.active_tag(), lambda m: print(m, flush=True))
+                r = dry_run(name, from_level, log=lambda m: print(m, flush=True), worker=worker)
+        except (CaptureError, UpgradeError, SwitchError, adb.AdbError, OSError) as e:
             print(f"dry run failed: {e}")
             store.notify("error", "upgrade", f"Dry run for {name} failed", str(e))
             if data_id:
@@ -378,6 +396,17 @@ def cmd_autostart(args):
     return 0
 
 
+def cmd_account(args):
+    """Jobs started from the dashboard's account menu."""
+    from . import accounts
+    store = Store()
+    log = lambda m: print(m, flush=True)  # noqa: E731
+    with keep_display_on():
+        if args.action == "switch":
+            return accounts.run_switch(store, args.tag, log)
+        return accounts.run_discover(store, log)
+
+
 def cmd_web(args):
     from .web import serve
     httpd = serve(args.host, args.port)
@@ -431,6 +460,10 @@ def main(argv=None):
     fm = sub.add_parser("farm", help="run a farming job queued from the dashboard")
     fm.add_argument("--run-id", type=int, required=True)
     fm.set_defaults(func=cmd_farm)
+    ac = sub.add_parser("account", help="switch the game account / find the linked accounts")
+    ac.add_argument("action", choices=("switch", "discover"))
+    ac.add_argument("--tag", help="account to switch to (switch)")
+    ac.set_defaults(func=cmd_account)
     w = sub.add_parser("web")
     w.add_argument("--host", default="0.0.0.0", help="0.0.0.0 = reachable from the LAN")
     w.add_argument("--port", type=int, default=8765)

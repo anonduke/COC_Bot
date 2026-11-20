@@ -133,14 +133,14 @@ class Orchestrator:
             return
         code = self.proc.returncode
         self.log(f"session ({self.current[0]}) ended with code {code}")
-        last = self.store.kv_get("last_session") or {}
+        last = self.store.kv_get(self.store.akey("last_session")) or {}
         progress = last.get("upgrades", 0) > 0 or " free" not in self.current[0]
-        streak = 0 if progress and code == 0 else self.store.kv_get("no_progress", 0) + 1
-        self.store.kv_set("no_progress", streak)
+        streak = 0 if progress and code == 0 else self.store.kv_get(self.store.akey("no_progress"), 0) + 1
+        self.store.kv_set(self.store.akey("no_progress"), streak)
         # A failed session leaves its due time in the past: without this the
         # next tick would start it again (seen live 2026-11-17).
-        fails = 0 if code == 0 else self.store.kv_get("fail_streak", {}).get("n", 0) + 1
-        self.store.kv_set("fail_streak", {"n": fails, "at": self.clock()})
+        fails = 0 if code == 0 else self.store.kv_get(self.store.akey("fail_streak"), {}).get("n", 0) + 1
+        self.store.kv_set(self.store.akey("fail_streak"), {"n": fails, "at": self.clock()})
         self.proc, self.current = None, None
 
     # --- scheduling -----------------------------------------------------------
@@ -158,11 +158,11 @@ class Orchestrator:
         cfg = effective(self.store)
         latest = self.store.latest()
         gd = game_data(latest.game_version) if latest else None
-        last = self.store.kv_get("last_session") or {}
+        last = self.store.kv_get(self.store.akey("last_session")) or {}
         due, reason = next_due(self.clock(), latest, gd, self._has_work(gd, cfg) if gd else
-                               (lambda s, w=None: False), cfg, self.store.kv_get("no_progress", 0),
+                               (lambda s, w=None: False), cfg, self.store.kv_get(self.store.akey("no_progress"), 0),
                                last.get("ended_at"))
-        fails = self.store.kv_get("fail_streak", {})
+        fails = self.store.kv_get(self.store.akey("fail_streak"), {})
         if fails.get("n"):
             retry = fails["at"] + FAIL_BACKOFF[min(fails["n"], len(FAIL_BACKOFF)) - 1]
             if retry > due:
@@ -218,7 +218,7 @@ class Orchestrator:
 
     def _cleanup_stale(self):
         """Sessions marked running whose process is gone: interrupted."""
-        for s in self.store.sessions(50):
+        for s in self.store.sessions(50, tag=None):        # every account's
             if s["status"] == "running" and not pid_alive(s["pid"]):
                 self.store.end_session(s["id"], "interrupted",
                                        (s["summary"] + "\n" if s["summary"] else "")

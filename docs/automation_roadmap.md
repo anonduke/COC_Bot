@@ -496,6 +496,32 @@ Never the magic-item Confirm, never a gem button. Anything unexpected after Conf
 - Phase 3's 24 h forecast check and the Phase 10 7-day soak: these now run as the service operates;
 - the Windows Firewall rule for access from other devices (needs admin, see README in chat).
 
+### Multiple accounts (2026-11-20)
+
+The game links several accounts to one Supercell ID. Switching in the game:
+profile → Settings tab → the Supercell ID bar shows the current tag → blue
+switch button → side panel with one card per account ("Supercell ID name",
+village name, "Town Hall: N"). Tapping a card restarts the game on that account
+within ~6 s, no confirmation. Below the cards: "OTHER IDS / Log in to Supercell
+ID", never tapped. Verified live with 3 accounts (Anonduke #2RQPVQJ2V TH19,
+RAHMANIV #9JCUV0CCV TH18, RAHMANV #2JV002VG2 TH18).
+
+- `village/accounts.py`: read the current tag (OCR of the bar), read the cards
+  (OCR, anchored on the "Town Hall: N" line), switch by exact Supercell ID name,
+  "Find accounts" (learns each card's tag by switching once), switch job.
+- Store v6: `accounts` table; queue items, sessions, actions, farm runs and
+  notifications carry the tag; per-account kv (`player:`, `last_session:`,
+  `no_progress:`, `fail_streak:`, `test:<tag>:`). The active account is the
+  `player_tag` setting; everything reads the active account by default, a
+  session pins its account at start. Pre-v6 rows were given to the account in use.
+- Safety: every capture checks the export tag. A session, "Capture now", a dry
+  run or a farming run that finds the game on another account switches back
+  first; a switch only becomes active after the new account's export was read.
+- Dashboard: account menu in the top bar (switch, rename, Find accounts), a
+  progress overlay while the game switches (visible in every open browser), all
+  data reloaded afterwards. Switching is refused during a session or farming run.
+- Automation works on the active account only.
+
 ---
 
 ## 6. Risks and limitations

@@ -79,3 +79,16 @@ class RejectTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GuardianTest(unittest.TestCase):
+    def test_guardian_upgrade_takes_a_builder(self):
+        # 19.x exports list Guardians (e.g. Longshot); an upgrading one holds a
+        # builder: the in-game counter showed 5/6 free with only this running.
+        raw = load_raw()
+        raw["guardians"] = [{"data": 107000000, "lvl": 4, "timer": 3259,
+                             "helper_timer": 0, "helper_recurrent": False}]
+        snap = parse_export(export_text(raw))
+        g = [j for j in snap.jobs("builder") if j.section == "guardians"]
+        self.assertEqual([(j.data, j.from_level, j.ends_at) for j in g],
+                         [(107000000, 4, snap.timestamp + 3259)])

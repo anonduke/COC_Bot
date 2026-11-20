@@ -22,6 +22,7 @@ JOB_KIND = {
     "buildings": "builder",
     "traps": "builder",
     "heroes": "builder",
+    "guardians": "builder",      # Guardian upgrades (e.g. Longshot) take a builder
     "units": "lab",
     "siege_machines": "lab",
     "spells": "lab",

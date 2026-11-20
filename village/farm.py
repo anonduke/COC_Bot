@@ -220,6 +220,13 @@ def run(run_id):
                     raise Abort(f"gave up after {DESKTOP_WAIT // 60} min: " + problem)
                 report(message="desktop OK again: farming")
 
+            if row.get("tag"):
+                # Never farm on another account than the one the run is for
+                # (the game may have been switched by hand).
+                from . import accounts
+                report(message="checking the game account")
+                accounts.ensure_account(store, row["tag"],
+                                        lambda m: logging.warning(f"[FARM] {m}"))
             wait_for_desktop()
             if not emulator.fit_window(lambda m: logging.warning(f"[FARM] {m}")):
                 raise RuntimeError("the LDPlayer window could not be put back to the size "

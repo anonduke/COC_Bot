@@ -46,7 +46,7 @@ const RES = {
 const resIcon = k => RES[k] ? `<img class="res-icon" src="/img/${RES[k].img}.png" alt="" title="${RES[k].label}">` : "";
 const lv = (n, max) => Math.min(max, Math.max(1, Math.round(n) || 1));
 const ART = {
-  th: n => `/img/th_${lv(n, 18)}.png`, lab: n => `/img/lab_${lv(n, 16)}.png`,
+  th: n => `/img/th_${lv(n, 19)}.png`, lab: n => `/img/lab_${lv(n, 16)}.png`,
   pet: n => `/img/pethouse_${lv(n, 12)}.png`, hut: n => `/img/builderhut_${lv(n, 9)}.png`,
   heroHall: n => `/img/herohall_${lv(n, 11)}.png`, builder: "/img/builder.png",
 };
@@ -550,7 +550,8 @@ function detailHTML(detail) {
 }
 function noteHTML(n, compactView) {
   return `<div class="note ${n.severity} ${n.acked_at ? "read" : ""}">${SEV[n.severity] || SEV.info}
-    <div><div><span class="sev ${n.severity}">${n.severity}</span> <span class="muted">· ${esc(n.source)}</span></div>
+    <div><div><span class="sev ${n.severity}">${n.severity}</span> <span class="muted">· ${esc(n.source)}</span>${
+      n.tag && S.accounts && n.tag !== S.accounts.active ? `<span class="acct-chip">${esc(acctName(accountByTag(n.tag)) || n.tag)}</span>` : ""}</div>
       <div class="msg">${esc(n.message)}</div>${n.detail && !compactView ? detailHTML(n.detail) : ""}</div>
     <div style="text-align:right"><div class="when">${ago(n.created_at)}</div>
       ${!n.acked_at && !compactView ? `<button class="btn small ghost" data-ack="${n.id}">Mark read</button>` : ""}</div></div>`;
@@ -1035,12 +1036,154 @@ $("#toggle-builder-table").addEventListener("click", e => {
   e.target.textContent = showTable ? "Lanes view" : "Table view";
 });
 
+// ---------- game accounts ----------
+// Switching happens in the game (Supercell ID), takes a minute or two and is
+// only finished once the new village has been read: until then everything on
+// the page stays on the old account and an overlay shows the progress.
+const SWITCH_STEPS = 6;   // typical number of steps reported by a switch job
+function acctName(a) { return a ? a.name || a.tag : ""; }
+function accountByTag(tag) { return (S.accounts?.accounts || []).find(a => a.tag === tag); }
+async function loadAccounts() {
+  let r;
+  try { r = await api("/api/accounts"); } catch { return; }
+  const prevActive = S.accounts?.active;
+  S.accounts = r;
+  renderAccounts();
+  const handled = renderJob(r.job);       // a finished switch reloads by itself
+  if (prevActive && r.active !== prevActive && !handled) reloadAll(true);   // e.g. from another browser
+}
+function renderAccounts() {
+  const r = S.accounts; if (!r) return;
+  const act = accountByTag(r.active);
+  $("#acct-name").textContent = act ? acctName(act) : "No account";
+  $("#acct-sub").textContent = act ? `TH${act.town_hall ?? "?"} · ${act.tag}` : "use Find accounts";
+  setImg($("#acct-img"), act?.town_hall ? ART.th(act.town_hall) : ART.builder);
+  const pencil = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 20h4L19 9l-4-4L4 16z"/></svg>';
+  $("#acct-list").innerHTML = r.accounts.length ? r.accounts.map(a => `
+    <div class="acct-item ${a.active ? "active" : ""}" data-tag="${esc(a.tag)}">
+      <img src="${a.town_hall ? ART.th(a.town_hall) : ART.builder}" alt="">
+      <div style="min-width:0"><div class="nm"><span>${esc(acctName(a))}</span>${a.xp ? `<span class="muted" style="font-weight:500">· XP ${a.xp}</span>` : ""}</div>
+        <div class="meta">TH${a.town_hall ?? "?"} · ${esc(a.tag)}${a.scid ? ` · ID ${esc(a.scid)}` : ""}</div>
+        <div class="meta">${a.synced_at ? "synced " + ago(a.synced_at) : "not read yet"}</div></div>
+      <div class="acts">
+        <button class="icon-btn rename" data-rename="${esc(a.tag)}" title="Name shown on this page">${pencil}</button>
+        ${a.active ? `<span class="badge-active">Active</span>`
+          : `<button class="btn small primary" data-switch="${esc(a.tag)}" ${a.can_switch ? "" : 'disabled title="Find accounts first: its Supercell ID name is not known"'}>Switch</button>`}
+      </div></div>`).join("")
+    : `<div class="empty">No accounts yet. Press <b>Find accounts in the game</b>.</div>`;
+}
+function toggleAcctMenu(open) {
+  const m = $("#acct-menu");
+  open = open ?? m.classList.contains("hidden");
+  m.classList.toggle("hidden", !open);
+  $("#acct-btn").setAttribute("aria-expanded", open);
+  if (open) loadAccounts();
+}
+$("#acct-btn").addEventListener("click", e => { e.stopPropagation(); toggleAcctMenu(); });
+document.addEventListener("click", e => {
+  if (!e.target.closest(".acct-wrap")) $("#acct-menu").classList.add("hidden");
+});
+document.addEventListener("keydown", e => { if (e.key === "Escape") toggleAcctMenu(false); });
+$("#acct-list").addEventListener("click", async e => {
+  const sw = e.target.closest("[data-switch]");
+  const rn = e.target.closest("[data-rename]");
+  if (sw && !sw.disabled) {
+    const a = accountByTag(sw.dataset.switch);
+    if (!confirm(`Switch the game to ${acctName(a)} (${a.tag})?\n\nThe game restarts on that account and the bot reads its village. This takes about 1–2 minutes; the page shows the progress.`)) return;
+    toggleAcctMenu(false);
+    try {
+      await api("/api/accounts/switch", { tag: a.tag });
+      S._jobWatch = true;
+      showJob({ kind: "switch", target: a.tag, state: "running", step: "Starting", steps: [], started_at: now() });
+      pollJob();
+    } catch (err) { toast(err.message, "error"); }
+  } else if (rn) {
+    const a = accountByTag(rn.dataset.rename);
+    const name = prompt(`Name shown on this page for ${a.tag} (empty = the name in the game):`, a.display_name || "");
+    if (name === null) return;
+    try { await api("/api/accounts/update", { tag: a.tag, display_name: name }); toast("Name saved"); loadAccounts(); loadState(); }
+    catch (err) { toast(err.message, "error"); }
+  }
+});
+$("#acct-discover").addEventListener("click", async () => {
+  if (!confirm("Find the accounts linked to this Supercell ID?\n\nThe bot reads the account list in the game, switches once to every account it doesn't know yet to learn its player tag and village, then switches back. About 1–2 minutes per new account.")) return;
+  toggleAcctMenu(false);
+  try {
+    await api("/api/accounts/discover", {});
+    S._jobWatch = true;
+    showJob({ kind: "discover", state: "running", step: "Starting", steps: [], started_at: now() });
+    pollJob();
+  } catch (err) { toast(err.message, "error"); }
+});
+
+let _jobPoll = null;
+function pollJob() {
+  if (_jobPoll) return;
+  _jobPoll = setInterval(async () => {
+    await loadAccounts();
+    if (S.accounts?.job?.state !== "running") { clearInterval(_jobPoll); _jobPoll = null; }
+  }, 2000);
+}
+function renderJob(job) {
+  if (!job) return false;
+  if (job.state === "running") { S._jobWatch = true; showJob(job); pollJob(); return false; }
+  if (!S._jobWatch) return false;         // an old result: don't pop up on page load
+  S._jobWatch = false;
+  showJob(job);
+  if (job.state !== "done") return false;
+  reloadAll(false);
+  toast(job.message || "Done");
+  setTimeout(() => $("#switch-overlay").classList.add("hidden"), 1600);
+  return true;
+}
+function showJob(job) {
+  const target = accountByTag(job.target);
+  const discover = job.kind === "discover";
+  const card = $("#switch-overlay .switch-card");
+  $("#switch-overlay").classList.remove("hidden");
+  card.classList.toggle("failed", job.state === "failed");
+  setImg($("#sw-img"), target?.town_hall ? ART.th(target.town_hall) : discover ? ART.builder : ART.builder);
+  $("#sw-title").textContent = job.state === "done" ? (discover ? "Accounts found" : `Now on ${acctName(target)}`)
+    : job.state === "failed" ? (discover ? "Finding accounts failed" : "Switch failed")
+    : discover ? "Finding your accounts" : `Switching to ${acctName(target) || job.target}`;
+  $("#sw-sub").textContent = job.state === "running"
+    ? (discover ? "The bot goes through the Supercell ID account list in the game." :
+       "The game restarts on the other account, then the bot reads its village. Everything here stays on the current account until that is done.")
+    : job.message || "";
+  const steps = job.steps || [];
+  const pct = job.state === "done" ? 100 : job.state === "failed" ? 100
+    : Math.min(92, 6 + steps.length / (discover ? 10 : SWITCH_STEPS) * 86);
+  $("#sw-bar").style.width = pct + "%";
+  $("#sw-steps").innerHTML = steps.map(([, text], i) => {
+    const last = i === steps.length - 1;
+    const cls = last && job.state === "running" ? "now" : last && job.state === "failed" ? "bad" : "";
+    return `<li class="${cls}">${esc(text)}</li>`;
+  }).join("") || `<li class="now">Starting…</li>`;
+  const end = job.ended_at || null;
+  const el = $("#sw-elapsed");
+  if (job.state === "running") { el.dataset.countdownUp = job.started_at; el.textContent = dur(now() - job.started_at); }
+  else { delete el.dataset.countdownUp; el.textContent = end ? `took ${dur(end - job.started_at)}` : ""; }
+  $("#sw-close").classList.toggle("hidden", job.state === "running");
+}
+$("#sw-close").addEventListener("click", () => $("#switch-overlay").classList.add("hidden"));
+
+// Everything on the page belongs to one account: fetch it all again.
+function reloadAll(announce) {
+  S.catalog = null; S.plan = null; S.tests = {}; S.history = null; S._lastBusy = undefined;
+  loadState(); loadHistory(); loadNotesCount(); loadAuto(); loadFarm(); loadStatus();
+  if (S.page === "queue") loadQueue();
+  if (S.page === "settings") loadSettings();
+  if (S.page === "notifications") loadNotes();
+  if (announce) toast(`Account changed: now showing ${acctName(accountByTag(S.accounts.active))}`);
+}
+
 // ---------- boot ----------
 addEventListener("resize", () => { if (S.state) renderDashTimeline(); if (S.page === "queue") renderPlanTimeline(); });
 addEventListener("hashchange", () => go(location.hash.slice(1)));
 (async function boot() {
   go(location.hash.slice(1) || "dashboard");
-  await Promise.all([loadState(), loadHistory(), loadStatus(), loadNotesCount()]);
+  await Promise.all([loadAccounts(), loadState(), loadHistory(), loadStatus(), loadNotesCount()]);
+  setInterval(() => { if (!_jobPoll) loadAccounts(); }, 20000);
   setInterval(loadState, 15000);
   setInterval(loadStatus, 10000);
   setInterval(loadNotesCount, 30000);
