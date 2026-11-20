@@ -323,6 +323,38 @@ def run_switch(store, tag, log=print):
         return 1
 
 
+def run_restart(store, log=print):
+    """Dashboard job: close LDPlayer completely (force-closing it if it hangs),
+    restart adb, start LDPlayer and the game, and read the active account's
+    village to prove everything works. Uses the same progress record as the
+    account jobs, so the page shows it the same way."""
+    from . import emulator
+    from .capture import capture_export, capture_lock
+    job = Job(store, "restart", store.active_tag(), log)
+    try:
+        with capture_lock(wait=30):
+            job.step("Closing LDPlayer")
+            emulator.stop(log)
+            job.step("Restarting adb")
+            emulator.restart_adb(log)
+            job.step("Starting LDPlayer (Android boots in 1-3 min)")
+            emulator.start(log)
+            job.step("Opening Clash of Clans")
+            emulator.ensure_ready(log)
+            tag = store.active_tag()
+            job.step("Reading the village (data export)")
+            cap = capture_for(store, tag, log, job.step) if tag else capture_export(log=log)
+            save_capture(store, cap, _gd_version(log))
+        if tag:     # failures before the restart shouldn't delay the next session
+            store.kv_set(store.akey("fail_streak", tag), {"n": 0, "at": int(time.time())})
+        job.end("done", "LDPlayer and the game restarted; village read")
+        return 0
+    except Exception as e:  # noqa: BLE001 - reported to the dashboard
+        job.end("failed", f"{type(e).__name__}: {e}")
+        store.notify("error", "emulator", "Restarting LDPlayer failed", str(e), tag=None)
+        return 1
+
+
 def run_discover(store, log=print):
     """Dashboard job: read the Supercell ID account list, learn the tag of
     every account (switching to the unknown ones and reading their village),

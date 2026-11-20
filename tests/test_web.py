@@ -4,6 +4,7 @@ import os
 import tempfile
 import threading
 import unittest
+from unittest import mock
 import urllib.error
 import urllib.request
 
@@ -179,6 +180,29 @@ class BasicWebTest(WebTest):
         self.assertEqual(st["snapshot"]["tag"], "#TESTTAG")
         self.assertIsNone(st["resources_before"])        # not the other account's numbers
         self.assertNotIn(999, [p["gold"] for p in self.api("/api/history?hours=1000")[1]["points"]])
+
+    def test_restart_emulator_when_busy(self):
+        s = Store(self.db)
+        sid = s.start_session("manual")                 # "running", pid = this process
+        s.close()
+        status, body = self.api("/api/actions/restart-emulator", {})
+        self.assertEqual(status, 409)
+        self.assertIn("session is using the game", body["error"])
+
+        class Done:
+            pid, returncode = 4242, 0
+            def poll(self):
+                return 0
+        with mock.patch.object(web, "_kill") as kill,                 mock.patch.object(web, "_start_game_job", return_value={"started": True}) as start,                 mock.patch.object(web, "_capture_proc", Done()),                 mock.patch("village.capture.is_capture_running", return_value=False),                 mock.patch("time.sleep"):
+            status, _ = self.api("/api/actions/restart-emulator", {"force": True})
+        self.assertEqual(status, 200)
+        kill.assert_called_once_with(os.getpid())
+        self.assertEqual(start.call_args[0][0], ["emulator", "restart"])
+        s = Store(self.db)
+        self.assertEqual(next(x for x in s.sessions(tag=None) if x["id"] == sid)["status"], "interrupted")
+        self.assertEqual(s.kv_get("account_job")["kind"], "restart")
+        s.kv_set("account_job", None)
+        s.close()
 
     def test_accounts(self):
         status, a = self.api("/api/accounts")

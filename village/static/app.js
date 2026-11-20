@@ -1136,18 +1136,24 @@ function renderJob(job) {
   setTimeout(() => $("#switch-overlay").classList.add("hidden"), 1600);
   return true;
 }
+const JOB_TEXT = {   // [running, done, failed, explanation]
+  restart: ["Restarting LDPlayer", "LDPlayer restarted", "Restart failed",
+            "LDPlayer is closed completely (force-closed if it hangs), started again, then the game opens and the bot reads the village. Takes 2–5 minutes."],
+};
 function showJob(job) {
   const target = accountByTag(job.target);
   const discover = job.kind === "discover";
+  const text = JOB_TEXT[job.kind];
   const card = $("#switch-overlay .switch-card");
   $("#switch-overlay").classList.remove("hidden");
   card.classList.toggle("failed", job.state === "failed");
   setImg($("#sw-img"), target?.town_hall ? ART.th(target.town_hall) : discover ? ART.builder : ART.builder);
-  $("#sw-title").textContent = job.state === "done" ? (discover ? "Accounts found" : `Now on ${acctName(target)}`)
+  $("#sw-title").textContent = text ? text[{ running: 0, done: 1, failed: 2 }[job.state] ?? 0]
+    : job.state === "done" ? (discover ? "Accounts found" : `Now on ${acctName(target)}`)
     : job.state === "failed" ? (discover ? "Finding accounts failed" : "Switch failed")
     : discover ? "Finding your accounts" : `Switching to ${acctName(target) || job.target}`;
   $("#sw-sub").textContent = job.state === "running"
-    ? (discover ? "The bot goes through the Supercell ID account list in the game." :
+    ? text ? text[3] : (discover ? "The bot goes through the Supercell ID account list in the game." :
        "The game restarts on the other account, then the bot reads its village. Everything here stays on the current account until that is done.")
     : job.message || "";
   const steps = job.steps || [];
@@ -1166,6 +1172,31 @@ function showJob(job) {
   $("#sw-close").classList.toggle("hidden", job.state === "running");
 }
 $("#sw-close").addEventListener("click", () => $("#switch-overlay").classList.add("hidden"));
+
+// ---------- restart LDPlayer (for a hung or unresponsive emulator) ----------
+async function restartEmulator() {
+  if (!confirm("Restart LDPlayer?\n\nLDPlayer is closed completely (force-closed if it hangs), started again, and the game is opened. Takes 2–5 minutes.")) return;
+  let body = {};
+  for (;;) {
+    try {
+      await api("/api/actions/restart-emulator", body);
+      break;
+    } catch (e) {
+      if (!body.force && /using the game/.test(e.message)
+          && confirm(`${e.message[0].toUpperCase() + e.message.slice(1)}.\n\nStop it and restart LDPlayer anyway? (Use this when the emulator is stuck.)`)) {
+        body = { force: true };
+        continue;
+      }
+      if (!/using the game/.test(e.message)) toast(e.message, "error");
+      return;
+    }
+  }
+  S._jobWatch = true;
+  showJob({ kind: "restart", target: S.accounts?.active, state: "running", step: "Starting", steps: [], started_at: now() });
+  pollJob();
+}
+$("#emu-restart").addEventListener("click", restartEmulator);
+$("#pill-emulator").addEventListener("click", restartEmulator);
 
 // Everything on the page belongs to one account: fetch it all again.
 function reloadAll(announce) {

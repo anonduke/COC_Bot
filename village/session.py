@@ -139,7 +139,7 @@ def _run_worker(store, game, sid, cfg, worker, state, tried, dry, gems0, out, lo
 
         aid = store.add_action(sid, "upgrade", "intent", c.data_id, c.name, c.from_level,
                                state["snap_id"])
-        r = game.upgrade(c.name, c.from_level, True, worker)
+        r = game.upgrade(c.name, c.from_level, True, worker, real_free=free)
         detail = r.reason + "".join("\n" + p for p in r.screenshots)
         if not r.confirm_tapped:
             store.update_action(aid, "skipped", detail)
@@ -229,9 +229,10 @@ def real_game(store, log=print):
                      "dark_fill": bar_fill(img, "dark_elixir")}
         return cap
 
-    def do_upgrade(name, from_level, confirm, worker="builder"):
-        fn = upgrader.upgrade if confirm else upgrader.dry_run
-        return fn(name, from_level, log=log, worker=worker)
+    def do_upgrade(name, from_level, confirm, worker="builder", real_free=None):
+        if confirm:
+            return upgrader.upgrade(name, from_level, log=log, worker=worker, real_free=real_free)
+        return upgrader.dry_run(name, from_level, log=log, worker=worker)
 
     def do_farm(params):
         p = farm.validate(params)

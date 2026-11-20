@@ -70,3 +70,29 @@ class BuilderCounterTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BuilderFreeTest(unittest.TestCase):
+    """Before Confirm on a building/hero: is a REAL builder free?"""
+
+    def setUp(self):
+        from village.upgrader import builder_free
+        self.check = builder_free
+        self.goblin = home_screen(((("home_counter_goblin.png"), (1380, 600)),))   # "1/7" + Goblin
+
+    def test_goblin_busy_and_a_real_builder_free(self):
+        # 2026-11-20: the export says 1 real builder free (the Goblin's job is
+        # running): the counter's free slot is that real builder.
+        ok, counter = self.check(self.goblin, real_free=1)
+        self.assertTrue(ok)
+        self.assertEqual(counter, (1, 7))
+
+    def test_only_the_goblin_is_free(self):
+        self.assertFalse(self.check(self.goblin, real_free=0)[0])
+
+    def test_counter_unreadable_or_nothing_free(self):
+        self.assertFalse(self.check(np.zeros((900, 1600, 3), np.uint8), real_free=1)[0])
+
+    def test_without_the_export_count_assume_the_goblin_is_the_free_one(self):
+        self.assertFalse(self.check(self.goblin)[0])
+        self.assertTrue(self.check(home_screen())[0])

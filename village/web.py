@@ -368,6 +368,53 @@ def account_discover(store):
     return result
 
 
+def _kill(pid):
+    subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True, timeout=30)
+
+
+def restart_emulator(store, body):
+    """Close LDPlayer completely and start it and the game again. If the bot
+    is using the game, refuse unless body.force: then the session / farming
+    run / test holding it is stopped first (a hung emulator hangs them too)."""
+    from .capture import is_capture_running
+    from .orchestrator import pid_alive
+    global _capture_proc
+    if _job_running(store):
+        raise ApiError(409, "a switch or restart is already in progress")
+    force = body.get("force") is True
+    running = [x for x in store.sessions(20, tag=None)
+               if x["status"] == "running" and pid_alive(x["pid"])]
+    farm = farm_payload(store)["current"]
+    web_job = _capture_proc is not None and _capture_proc.poll() is None
+    busy = running or farm or web_job or is_capture_running()
+    if busy and not force:
+        what = ("a session" if running else "a farming run" if farm
+                else "a capture, test or other job")
+        raise ApiError(409, f"{what} is using the game right now")
+    if busy:
+        for x in running:
+            _kill(x["pid"])
+            store.end_session(x["id"], "interrupted",
+                              (x["summary"] + "\n" if x["summary"] else "")
+                              + "stopped: LDPlayer restarted from the dashboard")
+        if farm:
+            if farm.get("pid") and pid_alive(farm["pid"]):
+                _kill(farm["pid"])
+            store.update_farm_run(farm["id"], status="stopped", ended_at=int(time.time()),
+                                  message="stopped: LDPlayer restarted from the dashboard")
+        if web_job:
+            _kill(_capture_proc.pid)
+            _capture_proc.wait(timeout=30)
+        time.sleep(2)         # the OS releases the game lock when the holder exits
+    result = _start_game_job(["emulator", "restart"], "LDPlayer restart")
+    store.kv_set("account_job", {"kind": "restart", "target": store.active_tag(), "state": "running",
+                                 "step": "Starting", "steps": [], "started_at": int(time.time()),
+                                 "ended_at": None, "message": "", "pid": _capture_proc.pid})
+    store.notify("info", "emulator", "LDPlayer restart started from the dashboard"
+                 + (" (stopped what was using the game)" if busy else ""), tag=None)
+    return result
+
+
 def account_update(store, body):
     tag = body.get("tag")
     if not isinstance(tag, str) or store.account(tag) is None:
@@ -631,6 +678,7 @@ class Handler(BaseHTTPRequestHandler):
                 ("POST", "/api/accounts/switch"): lambda: account_switch(store, body),
                 ("POST", "/api/accounts/discover"): lambda: account_discover(store),
                 ("POST", "/api/accounts/update"): lambda: account_update(store, body),
+                ("POST", "/api/actions/restart-emulator"): lambda: restart_emulator(store, body),
             }
             handler = routes.get((method, route))
             if handler is None:

@@ -71,7 +71,7 @@ class FakeGame:
                     return sec, e
         return None, None
 
-    def upgrade(self, name, from_level, confirm, worker="builder"):
+    def upgrade(self, name, from_level, confirm, worker="builder", real_free=None):
         self.calls.append(("upgrade", name, from_level, confirm))
         r = DryRun(name, from_level, found=True, affordable=True)
         data_id = {"Cannon": CANNON, "Barbarian King": KING, "Barbarian": BARB}[name]

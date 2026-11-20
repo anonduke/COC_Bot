@@ -44,7 +44,7 @@ import numpy as np
 from . import adb
 from .capture import capture_lock
 from .home import ensure_home, is_home
-from .resources import read_real_builder_counter
+from .resources import read_builder_counter, read_real_builder_counter
 
 _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _MISC = os.path.join(_REPO, "misc")
@@ -475,14 +475,34 @@ def dry_run(name, from_level, serial=adb.SERIAL, log=print, shot_dir=SHOT_DIR, w
         return _run(name, from_level, serial, log, shot_dir, confirm=False, worker=worker)
 
 
-def upgrade(name, from_level, serial=adb.SERIAL, log=print, shot_dir=SHOT_DIR, worker="builder"):
+def upgrade(name, from_level, serial=adb.SERIAL, log=print, shot_dir=SHOT_DIR, worker="builder",
+            real_free=None):
     """Like dry_run, but confirms the upgrade when every check passes and a
-    builder is free. result.confirmed = the dialog closed after Confirm."""
+    builder is free. result.confirmed = the dialog closed after Confirm.
+    `real_free`: free real builders according to a fresh export (Goblin jobs
+    excluded); when given, the screen counter only has to show a free slot."""
     with capture_lock(wait=30):
-        return _run(name, from_level, serial, log, shot_dir, confirm=True, worker=worker)
+        return _run(name, from_level, serial, log, shot_dir, confirm=True, worker=worker,
+                    real_free=real_free)
 
 
-def _run(name, from_level, serial, log, shot_dir, confirm, worker="builder"):
+def builder_free(img, real_free=None):
+    """(ok, counter) before confirming a building/hero upgrade.
+
+    The home counter includes the Goblin Builder's slot when its icon shows,
+    and the screen can't tell whether the Goblin or a real builder is the
+    free one. Live 2026-11-20: Goblin busy, one real builder free, counter
+    1/7 -> the old "subtract the Goblin" rule read 0/5 and refused three
+    upgrades. With the export's count of free REAL builders the counter just
+    has to show something free; without it, assume the Goblin is the free one."""
+    if real_free is not None:
+        counter = read_builder_counter(img)
+        return bool(counter and counter[0] >= 1 and real_free >= 1), counter
+    counter = read_real_builder_counter(img)
+    return bool(counter and counter[0] >= 1), counter
+
+
+def _run(name, from_level, serial, log, shot_dir, confirm, worker="builder", real_free=None):
     result = DryRun(name, from_level)
     want = from_level + 1
     os.makedirs(shot_dir, exist_ok=True)
@@ -492,10 +512,11 @@ def _run(name, from_level, serial, log, shot_dir, confirm, worker="builder"):
     if confirm and worker == "builder":
         # (lab / pet house: the session checked the real free slot in a fresh
         # export; a Goblin Researcher offer after Confirm is caught below.)
-        counter = read_real_builder_counter(adb.screencap(serial))
-        if not counter or counter[0] < 1:
+        ok, counter = builder_free(adb.screencap(serial), real_free)
+        if not ok:
             # Confirm with no free builder opens a gem-priced Goblin Builder offer.
-            result.reason = f"no free (real) builder on the counter ({counter})"
+            result.reason = (f"no free (real) builder (counter {counter}, "
+                             f"export {'?' if real_free is None else real_free} free)")
             return result
 
     # The counter was just read on the home screen by ensure_home.

@@ -152,18 +152,64 @@ def start(log=print, serial=adb.SERIAL, _retry=True):
     raise EmulatorError(f"Android did not finish booting within {BOOT_TIMEOUT}s")
 
 
-def stop(log=print):
-    """Quit LDPlayer and wait until it has really finished shutting down
-    (adb going offline happens long before the VM processes exit)."""
-    log("stopping LDPlayer")
-    ldconsole("quit", "--index", INDEX)
-    end = time.time() + 90
+# Window, VM, and the VirtualBox helpers. Live 2026-11-20: after a hang, a
+# stale VBoxNetDHCP / Ld9BoxSVC made the next boot come up without network
+# (no VBoxNetNAT, adb never connected) until every one of these was killed.
+LD_PROCESSES = ("dnplayer.exe", "Ld9BoxHeadless.exe", "VBoxNetNAT.exe", "VBoxNetDHCP.exe",
+                "Ld9BoxSVC.exe")
+
+
+def _stopped():
+    try:
+        return not adb_online() and not ld_running() and _processes_gone()
+    except (EmulatorError, subprocess.SubprocessError, OSError):
+        return False
+
+
+def _wait_stopped(seconds):
+    end = time.time() + seconds
     while time.time() < end:
-        if not adb_online() and not ld_running() and _processes_gone():
+        if _stopped():
             time.sleep(3)
-            return
+            return True
         time.sleep(2)
-    raise EmulatorError("LDPlayer did not shut down within 90s")
+    return False
+
+
+def kill_processes(log=print):
+    """Force-close LDPlayer's window and VM processes (for a hung emulator
+    that ignores `ldconsole quit`)."""
+    for name in LD_PROCESSES:
+        r = subprocess.run(["taskkill", "/F", "/T", "/IM", name], capture_output=True,
+                           text=True, timeout=30)
+        if r.returncode == 0:
+            log(f"force-closed {name}")
+
+
+def stop(log=print, quit_wait=45):
+    """Quit LDPlayer and wait until it has really finished shutting down
+    (adb going offline happens long before the VM processes exit). If it
+    doesn't (live 2026-11-20: hung graphics, `quit` ignored, VBoxNetNAT left
+    behind), force-close its processes."""
+    log("stopping LDPlayer")
+    try:
+        ldconsole("quit", "--index", INDEX)
+    except EmulatorError as e:
+        log(f"ldconsole quit: {e}")
+    if not _wait_stopped(quit_wait):
+        log(f"LDPlayer did not shut down within {quit_wait}s: force-closing it")
+    # Also after a clean quit: leftover VirtualBox helpers break the next boot.
+    kill_processes(log)
+    if not _wait_stopped(45):
+        raise EmulatorError("LDPlayer is still running after force-closing it")
+
+
+def restart_adb(log=print):
+    """Restart the adb server (it can hang along with the emulator)."""
+    log("restarting adb")
+    subprocess.run([adb.ADB, "kill-server"], capture_output=True, timeout=30)
+    time.sleep(2)
+    subprocess.run([adb.ADB, "start-server"], capture_output=True, timeout=60)
 
 
 def launch_clash(serial=adb.SERIAL):

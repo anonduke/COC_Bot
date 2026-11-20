@@ -43,7 +43,7 @@
         </div>
       </div>
       <span class="spacer"></span>
-      <span class="pill" id="pill-emulator" title="Emulator state, checked every 20 s"><span class="dot"></span><span>Emulator…</span></span>
+      <span class="pill" id="pill-emulator" style="cursor:pointer" title="Emulator state, checked every 20 s. Click to restart LDPlayer and the game."><span class="dot"></span><span>Emulator…</span></span>
       <span class="pill" id="pill-auto" data-goto="automation" style="cursor:pointer" title="Automation status"><span class="dot"></span><span>Automation…</span></span>
       <span class="pill hidden" id="pill-farm" data-goto="attack" style="cursor:pointer" title="Farming run in progress"><span class="dot good pulse"></span><span>Farming</span></span>
       <span class="pill" id="pill-updated" title="Age of the latest village snapshot"><span class="dot"></span><span>—</span></span>
@@ -173,7 +173,10 @@
               <div class="hero-figure num" id="auto-next" style="font-size:34px">–</div>
               <div class="muted" id="auto-next-why"></div></div>
             <div style="margin-left:auto;display:flex;gap:8px;flex-wrap:wrap;align-items:flex-start">
-              <button class="btn primary" id="auto-run">Run a session now</button></div>
+              <button class="btn primary" id="auto-run">Run a session now</button>
+              <button class="btn" id="emu-restart" title="Close LDPlayer completely (force-closing it if it hangs), start it again, open the game and read the village">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 3v9"/><path d="M6.3 6.3a8 8 0 1 0 11.4 0"/></svg>
+                Restart LDPlayer</button></div>
           </div>
           <div class="set-row"><div><div class="set-label">Automation</div>
               <div class="set-help">When on, the bot runs sessions by itself: when a builder frees, and a health check every few hours. Paused: only "Run a session now" does anything.</div></div>

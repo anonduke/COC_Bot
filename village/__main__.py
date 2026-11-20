@@ -407,6 +407,13 @@ def cmd_account(args):
         return accounts.run_discover(store, log)
 
 
+def cmd_emulator(args):
+    """`emulator restart`: close LDPlayer (force if hung) and start it and the game again."""
+    from . import accounts
+    with keep_display_on():
+        return accounts.run_restart(Store(), lambda m: print(m, flush=True))
+
+
 def cmd_web(args):
     from .web import serve
     httpd = serve(args.host, args.port)
@@ -464,6 +471,9 @@ def main(argv=None):
     ac.add_argument("action", choices=("switch", "discover"))
     ac.add_argument("--tag", help="account to switch to (switch)")
     ac.set_defaults(func=cmd_account)
+    em = sub.add_parser("emulator", help="restart LDPlayer and the game (force-closes a hung one)")
+    em.add_argument("action", choices=("restart",))
+    em.set_defaults(func=cmd_emulator)
     w = sub.add_parser("web")
     w.add_argument("--host", default="0.0.0.0", help="0.0.0.0 = reachable from the LAN")
     w.add_argument("--port", type=int, default=8765)
