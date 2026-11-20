@@ -80,6 +80,16 @@ class BasicWebTest(WebTest):
     def test_dryrun_needs_a_queue(self):
         self.assertEqual(self.api("/api/actions/dryrun", {})[0], 409)
 
+    def test_item_test_endpoints(self):
+        self.assertEqual(self.api("/api/tests")[0], 200)
+        self.assertEqual(self.api("/api/actions/dryrun", {"data_id": "x"})[0], 400)
+        # stale "running" results are reported as unfinished, not forever running
+        s = Store(self.db)
+        s.kv_set("test:123", {"state": "running", "at": 1})
+        s.close()
+        r = self.api("/api/tests")[1]["results"]["123"]
+        self.assertEqual((r["state"], r["found"]), ("done", False))
+
     def test_farm_validation_and_stop(self):
         self.assertEqual(self.api("/api/farm")[0], 200)
         self.assertEqual(self.api("/api/farm/start", {"mode": "nuke"})[0], 400)

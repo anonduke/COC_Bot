@@ -492,8 +492,10 @@ $("#ack-all").addEventListener("click", async () => {
 // ---------- queue ----------
 async function loadQueue() {
   try {
-    const [plan, cat] = await Promise.all([api("/api/plan"), S.catalog ? null : api("/api/catalog")]);
+    const [plan, cat, tests] = await Promise.all([api("/api/plan"), S.catalog ? null : api("/api/catalog"),
+                                                   api("/api/tests").catch(() => ({ results: {} }))]);
     S.plan = plan;
+    S.tests = tests.results;
     if (cat) S.catalog = cat;
     renderQueue(); renderCatalog(); renderPlanTimeline();
   } catch (e) {
@@ -529,12 +531,13 @@ function renderQueue() {
       <div class="q-main"><div class="q-title">${esc(it.name)}${it.worker && it.worker !== "builder" ? ` <span class="tag">${it.worker === "lab" ? "Laboratory" : "Pet House"}</span>` : ""}
           ${c ? `<span class="muted" style="font-weight:400;font-size:12.5px">×${c.count}, level ${c.min_level === c.levels?.[c.levels.length - 1] ? c.min_level : c.min_level + "–" + c.levels[c.levels.length - 1]}</span>` : ""}
           ${c?.upgrading ? `<span class="tag" title="Counted at its next level">${c.upgrading} upgrading</span>` : ""}</div>
-        <div class="q-meta">${meta.map(m => `<span>${m}</span>`).join("")}</div></div>
+        <div class="q-meta">${meta.map(m => `<span>${m}</span>`).join("")}</div>${testHTML(it.data_id)}</div>
       <div class="q-actions">
         <button class="icon-btn" data-move="-1" title="Move up" ${idx === 0 ? "disabled" : ""}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 15l6-6 6 6"/></svg></button>
         <button class="icon-btn" data-move="1" title="Move down" ${idx === items.length - 1 ? "disabled" : ""}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg></button>
         <select data-target title="Target level">${opts.join("")}</select>
         <label class="switch" title="Enabled"><input type="checkbox" data-enabled ${it.enabled ? "checked" : ""}><span></span></label>
+        <button class="btn small" data-test="${it.data_id}" title="Open this upgrade's dialog in the game, check it, close it (never confirms)">Test</button>
         <button class="icon-btn" data-delete title="Remove from queue"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></svg></button>
       </div></div>`;
   }).join("");
@@ -586,6 +589,45 @@ $("#queue").addEventListener("drop", e => {
   planCall("/api/plan/order", { ids });
 });
 
+// ---------- "Test" = dry run of one item in the game ----------
+const WORKER_TAB = { builder: "Buildings & Heroes", lab: "Army Upgrades", pet_house: "Hero Pets" };
+function testHTML(id) {
+  const r = (S.tests || {})[id];
+  if (!r) return "";
+  if (r.state === "running") return `<div class="test-res running"><span class="dot warning pulse"></span> Testing in the game… (about 2–5 min)</div>`;
+  const shots = (r.screenshots || []).map(f => `<a href="/shots/dryrun/${encodeURIComponent(f)}" target="_blank" rel="noopener">screenshot</a>`).join(" · ");
+  if (r.found) {
+    const money = r.affordable === false ? ` <span class="warn-text">price in red: not enough resources yet</span>` : "";
+    return `<div class="test-res ok">✓ Works: found <b>${esc(r.title || `${r.name} → ${r.to}`)}</b> in ${WORKER_TAB[r.worker] || "the Build menu"}${money}
+      <span class="muted">· ${ago(r.at)}</span> ${shots}</div>`;
+  }
+  return `<div class="test-res bad">✗ Not found: ${esc(r.reason || "")} <span class="muted">· ${ago(r.at)}</span> ${shots}</div>`;
+}
+async function startTest(id) {
+  try {
+    await api("/api/actions/dryrun", { data_id: id });
+    S.tests = { ...(S.tests || {}), [id]: { state: "running", at: now() } };
+    renderQueue(); renderCatalog();
+    toast("Test started: the bot opens this upgrade's dialog in the game, checks it and closes it. Nothing is confirmed.");
+    pollTests();
+  } catch (e) { toast(e.message, "error"); }
+}
+let _testPoll = null;
+function pollTests() {
+  if (_testPoll) return;
+  _testPoll = setInterval(async () => {
+    try { S.tests = (await api("/api/tests")).results; } catch { return; }
+    if (S.plan) { renderQueue(); renderCatalog(); }
+    if (!Object.values(S.tests).some(r => r.state === "running")) {
+      clearInterval(_testPoll); _testPoll = null; loadStatus();
+    }
+  }, 5000);
+}
+document.addEventListener("click", e => {
+  const b = e.target.closest("[data-test]");
+  if (b && !b.disabled) { e.stopPropagation(); startTest(+b.dataset.test); }
+}, true);
+
 function renderCatalog() {
   const items = S.catalog?.items || [];
   const q = $("#cat-search").value.trim().toLowerCase();
@@ -605,7 +647,10 @@ function renderCatalog() {
     return `<div class="cat-item"><div><div class="name">${esc(c.name)} <span class="muted" style="font-weight:400">×${c.count}</span>
         ${c.upgrading ? `<span class="tag">${c.upgrading} upgrading</span>` : ""}</div>
       <div class="meta">level ${lvls} of ${c.max_level} · ${c.steps_left} step${c.steps_left === 1 ? "" : "s"} left · ${nxt}</div>${pips}</div>
-      <button class="btn small" data-add="${c.id}" ${c.steps_left ? "" : "disabled"}>${inQueue.has(c.id) ? "Add again" : "Add"}</button></div>`;
+      <div style="display:flex;gap:6px;flex-direction:column;align-items:flex-end">
+        <button class="btn small" data-add="${c.id}" ${c.steps_left ? "" : "disabled"}>${inQueue.has(c.id) ? "Add again" : "Add"}</button>
+        <button class="btn small ghost" data-test="${c.id}" ${c.steps_left ? "" : "disabled"} title="Dry run in the game (never confirms)">Test</button></div>
+      <div style="grid-column:1/-1">${testHTML(c.id)}</div></div>`;
   }).join("") : `<div class="empty">Nothing matches.</div>`;
 }
 $("#cat-search").addEventListener("input", renderCatalog);

@@ -216,12 +216,43 @@ def next_queue_step(store, gd):
     return gd.name(p.step.data), p.step.from_level, p
 
 
+def _save_test(store, data_id, result):
+    """Result of a dashboard "Test" (dry run) for one item, shown on the page."""
+    result["at"] = int(time.time())
+    store.kv_set(f"test:{data_id}", result)
+
+
 def cmd_dryrun(args):
     from . import adb
     from .capture import CaptureError
     from .upgrader import UpgradeError, dry_run
     store = Store()
-    if args.queue:
+    data_id = args.id
+    if data_id:
+        from .catalog import SECTIONS, instances, section_of
+        stored = store.latest()
+        gd = _load_gamedata(stored.game_version if stored else None)
+        sec = section_of(stored.snapshot, data_id) if gd else None
+        idle = sorted(e.level for e in stored.snapshot.entries
+                      if e.data == data_id and e.section in SECTIONS and e.level is not None
+                      and not e.upgrading) if sec else []
+        if not idle:
+            msg = ("every copy is being upgraded right now" if sec and instances(
+                stored.snapshot, data_id)[1] else "not found in the village")
+            _save_test(store, data_id, {"state": "done", "found": False, "reason": msg})
+            print(msg)
+            return 1
+        name, from_level, worker = gd.name(data_id), idle[0], SECTIONS[sec][0]
+        from .catalog import cap
+        top = cap(gd, stored.snapshot, data_id) or 0
+        if from_level >= top:
+            msg = (f"already at the highest level available now ({top}); "
+                   "the game doesn't list it in the Build menu")
+            _save_test(store, data_id, {"state": "done", "found": False, "reason": msg})
+            print(msg)
+            return 1
+        print(f"testing {name} {from_level} -> {from_level + 1} ({worker})")
+    elif args.queue:
         stored = store.latest()
         gd = _load_gamedata(stored.game_version if stored else None)
         nxt = next_queue_step(store, gd)
@@ -243,7 +274,15 @@ def cmd_dryrun(args):
         except (CaptureError, UpgradeError, adb.AdbError, OSError) as e:
             print(f"dry run failed: {e}")
             store.notify("error", "upgrade", f"Dry run for {name} failed", str(e))
+            if data_id:
+                _save_test(store, data_id, {"state": "done", "found": False, "reason": str(e)})
             return 1
+    if data_id:
+        _save_test(store, data_id, {
+            "state": "done", "found": r.found, "affordable": r.affordable,
+            "name": name, "from": from_level, "to": from_level + 1, "worker": worker,
+            "reason": r.reason, "title": r.title,
+            "screenshots": [os.path.basename(p) for p in r.screenshots]})
     print(f"{'FOUND' if r.found else 'NOT FOUND'}: {r.reason}")
     for row, title in r.rows_opened:
         print(f"  opened {row!r}: {title!r}")
@@ -372,6 +411,7 @@ def main(argv=None):
     v.set_defaults(func=cmd_verify)
     d = sub.add_parser("dryrun", help="open an upgrade dialog and close it; never confirms")
     d.add_argument("--queue", action="store_true", help="the next step of the upgrade queue")
+    d.add_argument("--id", type=int, help="test one item by its game ID (lowest idle copy)")
     d.add_argument("--name", help='building/hero name as in game, e.g. "Wizard Tower"')
     d.add_argument("--from", dest="from_level", type=int, help="current level of that copy")
     d.add_argument("--worker", default="builder", choices=("builder", "lab", "pet_house"),

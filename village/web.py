@@ -243,11 +243,37 @@ def start_capture(store):
     return _start_game_job(["capture"] + (["--tag", tag] if tag else []), "capture")
 
 
-def start_dryrun(store):
-    """Dry run of the queue's next step: opens the upgrade dialog, never confirms."""
-    if not store.plan():
-        raise ApiError(409, "the upgrade queue is empty")
-    return _start_game_job(["dryrun", "--queue"], "dry run")
+def start_dryrun(store, body=None):
+    """Dry run (opens the upgrade dialog, never confirms) of one item
+    (body {"data_id": N}) or of the queue's next step."""
+    data_id = _int_or_none((body or {}).get("data_id"), "data_id")
+    if data_id is None:
+        if not store.plan():
+            raise ApiError(409, "the upgrade queue is empty")
+        return _start_game_job(["dryrun", "--queue"], "dry run")
+    stored, gd = _latest_with_gd(store)
+    if gd.get(data_id) is None:
+        raise ApiError(400, f"unknown object {data_id}")
+    item = next((c for c in catalog(stored.snapshot, gd) if c["id"] == data_id), None)
+    if item is not None and not item["steps_left"]:
+        raise ApiError(409, f"{item['name']} is already at the highest level available now "
+                            f"({item['max_level']}); there is nothing to test")
+    result = _start_game_job(["dryrun", "--id", str(data_id)], f"test of {gd.name(data_id)}")
+    store.kv_set(f"test:{data_id}", {"state": "running", "at": int(time.time())})
+    return result
+
+
+def test_results(store):
+    """{data_id: last Test result} for the page."""
+    rows = store.db.execute("SELECT key, value FROM kv WHERE key LIKE 'test:%'").fetchall()
+    out = {}
+    for k, v in rows:
+        r = json.loads(v)
+        # a test that never reported back (process died) shouldn't spin forever
+        if r.get("state") == "running" and time.time() - r.get("at", 0) > 15 * 60:
+            r = {"state": "done", "found": False, "reason": "the test did not finish", "at": r["at"]}
+        out[int(k.split(":", 1)[1])] = r
+    return out
 
 
 ORCH_ALIVE = 90        # seconds without an orchestrator heartbeat = not running
@@ -480,7 +506,8 @@ class Handler(BaseHTTPRequestHandler):
                     "acked": store.ack(_int_or_none(body.get("id"), "id"))},
                 ("GET", "/api/status"): lambda: self._status(),
                 ("POST", "/api/actions/capture"): lambda: start_capture(store),
-                ("POST", "/api/actions/dryrun"): lambda: start_dryrun(store),
+                ("POST", "/api/actions/dryrun"): lambda: start_dryrun(store, body),
+                ("GET", "/api/tests"): lambda: {"results": test_results(store)},
                 ("GET", "/api/automation"): lambda: automation_payload(store),
                 ("POST", "/api/automation"): lambda: automation_update(store, body),
                 ("POST", "/api/automation/run"): lambda: automation_run_now(store),
