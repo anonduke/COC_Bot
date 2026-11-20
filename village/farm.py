@@ -27,7 +27,8 @@ import time
 import traceback
 
 MODES = ("full", "attacks", "target")
-DESKTOP_WAIT = 15 * 60      # how long a run waits for the desktop to come back
+DESKTOP_WAIT = 15 * 60
+MAX_LOOT = 9_999_999        # more gold than any base can offer = a misread      # how long a run waits for the desktop to come back
 
 
 class Abort(Exception):
@@ -223,6 +224,55 @@ def run(run_id):
             if not emulator.fit_window(lambda m: logging.warning(f"[FARM] {m}")):
                 raise RuntimeError("the LDPlayer window could not be put back to the size "
                                    "the attack code needs (1196x673 game picture at 85,44)")
+            # Loot digits are yellow during the cake event; the cream-only
+            # reader then read 46-48 gold and skipped every base (2026-11-19).
+            from . import loot
+            R._loot_digit_mask = loot.digit_mask
+            _recognize = R.recognize_numbers_from_region
+
+            def recognize_and_keep(region):
+                """Keep each loot crop as evidence, named by what was read."""
+                value = _recognize(region)
+                if value > MAX_LOOT:
+                    # Live 2026-11-19 one base read 62 074 196: a stray glyph
+                    # joined the number. Treat as unreadable: skip the base.
+                    logging.warning(f"[FARM] loot read {value} is impossible; treating as 0")
+                    value = 0
+                try:
+                    import shutil
+                    crops = os.path.join(run_dir, "loot")
+                    os.makedirs(crops, exist_ok=True)
+                    shutil.copy(R.gold_region_files[-1],
+                                os.path.join(crops, f"{time.strftime('%H%M%S')}_{value}.png"))
+                except Exception:  # noqa: BLE001 - evidence only
+                    pass
+                return value
+            R.recognize_numbers_from_region = recognize_and_keep
+            # Star Bonus / reward chest / Continue screens after a battle
+            # (19.32+): handle them before the next attack can click into them.
+            from . import rewards
+            _finish = R.finishBattleAndGoHome
+
+            def finish_and_clear(*a, **k):
+                ok = _finish(*a, **k)
+                if ok:
+                    got = rewards.clear_rewards(appear_within=10,
+                                                log=lambda m: logging.warning(f"[FARM] {m}"))
+                    if got:
+                        report(message=f"cleared reward screens: {', '.join(got)}")
+                return ok
+            R.finishBattleAndGoHome = finish_and_clear
+            # After the last troop/spell is deployed: battle speed 1x -> 4x,
+            # so the battle (and the bot's wait for it) ends sooner.
+            from . import battle
+            _deploy = R.deployTroops
+
+            def deploy_and_speed_up(*a, **k):
+                ok = _deploy(*a, **k)
+                if ok:
+                    battle.speed_up(log=lambda m: logging.warning(f"[FARM] {m}"))
+                return ok
+            R.deployTroops = deploy_and_speed_up
             R.CONFIG["ranked_mode"] = p["ranked"]
             R.CONFIG["event_troops"] = p["event_troops"]
             R.cleanup_session()
@@ -256,6 +306,7 @@ def run(run_id):
 
             def attack():
                 wait_for_desktop()
+                rewards.clear_rewards(log=lambda m: logging.warning(f"[FARM] {m}"))
                 # LDPlayer can re-dock its ad panel and move/resize the window
                 # at any time (live 2026-11-19); refit before every attack.
                 emulator.fit_window(lambda m: logging.warning(f"[FARM] {m}"))

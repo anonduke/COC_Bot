@@ -18,7 +18,7 @@ import time
 
 import cv2
 
-from . import adb
+from . import adb, rewards
 from .resources import read_builder_counter, read_value
 
 _MISC = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "misc")
@@ -72,8 +72,12 @@ def _settle(timeout, serial, log):
         except adb.AdbError:
             time.sleep(2)   # black frames while the game (re)loads, or adb hiccup
             continue
-        if is_home(img):
+        if is_home(img) and rewards.classify(img) is None:
             return True
+        if rewards.classify(img):
+            for kind in rewards.clear_rewards(serial, log):
+                log(f"handled reward screen: {kind}")
+            continue
         closed = close_popup(img, serial)
         if closed:
             log(f"closed popup {closed}")
