@@ -26,6 +26,8 @@ SETTINGS = [
             "Stops all automatic sessions. Manual actions on this page still work.", 8),
     Setting("player_tag", "Automation", "Player tag", "text", "",
             "The village to manage, e.g. #9JCUV0CCV. Captures of any other village are rejected.", 2),
+    Setting("player_name", "Automation", "Player name", "text", "",
+            "Shown in the dashboard header. Empty: the name read from the game screen.", 2),
     Setting("active_start", "Schedule", "Active hours start", "time", "07:00",
             "Sessions only start inside the active hours (local time).", 8),
     Setting("active_end", "Schedule", "Active hours end", "time", "23:30",
@@ -86,6 +88,8 @@ def validate(key, value):
     if not isinstance(value, str) or len(value) > 200:
         raise ValueError(f"{s.label}: expected text")
     v = value.strip()
+    if key == "player_name" and len(v) > 30:
+        raise ValueError("Player name: at most 30 characters")
     if key == "player_tag" and v and not re.match(r"^#[0-9A-Z]{3,15}$", v.upper()):
         raise ValueError("Player tag: expected something like #9JCUV0CCV")
     return v.upper() if key == "player_tag" else v

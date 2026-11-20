@@ -18,13 +18,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 from . import adb, gamedata
-from .builders import WORKERS, forecast
+from .builders import BUILDERS_HUT, LABORATORY, PET_HOUSE, WORKERS, forecast
 from .catalog import HERO_HALL, TOWN_HALL, WORKER_NAMES, cap, catalog, preview, step
-from .settings import SETTINGS, validate
+from .settings import SETTINGS, effective, validate
 from .store import Store
 
 PREVIEW_STEPS = 600   # queue steps simulated for the preview
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+IMG = os.path.join(STATIC, "img")
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SHOTS = os.path.join(REPO, "data", "screens", "dryrun")
 CONTENT_TYPES = {".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8",
@@ -96,6 +97,16 @@ def _job_dict(gd, j, kind):
             "helper": j.helper, "extra": j.extra}
 
 
+def player_payload(store, snap):
+    """Name (setting first, else read from the game screen), clan, XP level."""
+    seen = store.kv_get("player") or {}
+    if seen.get("tag") not in (None, snap.tag):
+        seen = {}
+    name = (effective(store).get("player_name") or "").strip()
+    return {"name": name or seen.get("name"), "read_name": seen.get("name"),
+            "clan": seen.get("clan"), "xp": seen.get("xp"), "tag": snap.tag}
+
+
 def state_payload(store):
     stored = store.latest()
     if stored is None:
@@ -126,7 +137,13 @@ def state_payload(store):
         "now": now,
         "snapshot": {"id": stored.id, "tag": snap.tag, "exported_at": snap.timestamp,
                      "captured_at": stored.captured_at, "game_version": stored.game_version,
-                     "town_hall": snap.level_of(TOWN_HALL), "hero_hall": snap.level_of(HERO_HALL)},
+                     "town_hall": snap.level_of(TOWN_HALL), "hero_hall": snap.level_of(HERO_HALL),
+                     "lab_level": snap.level_of(LABORATORY),
+                     "pet_house_level": snap.level_of(PET_HOUSE),
+                     "builder_huts": sorted((e.level for e in snap.section("buildings")
+                                             if e.data == BUILDERS_HUT and e.level is not None
+                                             for _ in range(e.count)), reverse=True)},
+        "player": player_payload(store, snap),
         "resources": {"gold": r.gold, "elixir": r.elixir, "dark_elixir": r.dark_elixir,
                       "gems": r.gems},
         "resources_before": dict(day_ago) if day_ago else None,
@@ -437,12 +454,12 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):  # quiet: no per-request console spam
         pass
 
-    def _send(self, status, body, ctype="application/json; charset=utf-8"):
+    def _send(self, status, body, ctype="application/json; charset=utf-8", cache="no-store"):
         data = body if isinstance(body, bytes) else json.dumps(body).encode()
         self.send_response(status)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
-        self.send_header("Cache-Control", "no-store")
+        self.send_header("Cache-Control", cache)
         self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         self.wfile.write(data)
@@ -451,9 +468,11 @@ class Handler(BaseHTTPRequestHandler):
         path = os.path.normpath(os.path.join(STATIC, rel))
         if not path.startswith(STATIC + os.sep) or not os.path.isfile(path):
             return self._send(404, {"error": "not found"})
+        # Game artwork never changes: let the browser keep it for a day.
+        cache = "max-age=86400" if path.startswith(IMG + os.sep) else "no-store"
         with open(path, "rb") as f:
             self._send(200, f.read(), CONTENT_TYPES.get(os.path.splitext(path)[1],
-                                                         "application/octet-stream"))
+                                                         "application/octet-stream"), cache)
 
     def _shot(self, name):
         """Dry-run dialog screenshots (data/screens/dryrun/*.png)."""

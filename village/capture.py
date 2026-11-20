@@ -32,6 +32,7 @@ import cv2
 from . import adb, clipboard
 from .export import ExportError, parse_export
 from .home import ensure_home
+from .player import read_player
 from .resources import read_real_builder_counter, read_resources
 from .store import Resources
 
@@ -65,6 +66,7 @@ class Capture:
     resources: Resources      # home-screen OCR
     counter: tuple | None     # (free, total) builder counter, or None
     home_at: float            # when the home screenshot was taken (epoch s)
+    player: dict | None = None  # {"name", "clan", "xp"} read from the home screen
 
 
 def _template(name):
@@ -201,6 +203,7 @@ def _capture_export(expected_tag, max_age, serial, log, screen_dir):
     home = adb.screencap(serial)
     resources = read_resources(home)
     counter = read_real_builder_counter(home)
+    player = read_player(home)
     if screen_dir:
         os.makedirs(screen_dir, exist_ok=True)
         cv2.imwrite(os.path.join(screen_dir, time.strftime("home_%Y%m%d_%H%M%S.png")), home)
@@ -278,4 +281,4 @@ def _capture_export(expected_tag, max_age, serial, log, screen_dir):
             clipboard.set_text(saved_clip)
         except OSError as e:
             log(f"warning: could not restore the clipboard: {e}")
-    return Capture(text, snap, resources, counter, captured_at)
+    return Capture(text, snap, resources, counter, captured_at, player)

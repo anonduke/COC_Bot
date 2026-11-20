@@ -84,7 +84,8 @@ def cmd_capture(args):
                 ok += 1
                 snap, res = cap.snapshot, cap.resources
                 sid = store.save_snapshot(snap, res, game_version=version,
-                                          captured_at=cap.home_at, counter=cap.counter)                     if store else None
+                                          captured_at=cap.home_at, counter=cap.counter,
+                                          player=cap.player)                     if store else None
                 match, computed = counter_check(snap, cap.counter, cap.home_at, gd)
                 if match is not None:
                     checked += 1

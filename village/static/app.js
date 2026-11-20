@@ -36,13 +36,23 @@ function ago(t) {
   if (s < 60) return "just now";
   return dur(s) + " ago";
 }
+// Official Clash of Clans artwork (Supercell Fan Kit), in /img.
 const RES = {
-  gold:        { label: "Gold",        color: "#eda100", icon: '<circle cx="12" cy="12" r="8" fill="#eda100"/><circle cx="12" cy="12" r="5" fill="none" stroke="#fff6" stroke-width="1.5"/>' },
-  elixir:      { label: "Elixir",      color: "#e87ba4", icon: '<path d="M12 3c3 5 6 8 6 11a6 6 0 0 1-12 0c0-3 3-6 6-11z" fill="#e87ba4"/>' },
-  dark_elixir: { label: "Dark elixir", color: "#9085e9", icon: '<path d="M12 3c3 5 6 8 6 11a6 6 0 0 1-12 0c0-3 3-6 6-11z" fill="#4a3f8f"/><path d="M9 14a3 3 0 0 0 3 3" stroke="#9085e9" stroke-width="1.6" fill="none"/>' },
-  gems:        { label: "Gems",        color: "#1baf7a", icon: '<path d="M12 3l7 6-7 12L5 9z" fill="#1baf7a"/><path d="M5 9h14M12 3v18" stroke="#fff5" stroke-width="1"/>' },
+  gold:        { label: "Gold",        color: "#f2b51d", img: "gold" },
+  elixir:      { label: "Elixir",      color: "#e05fb4", img: "elixir" },
+  dark_elixir: { label: "Dark elixir", color: "#8b7bd8", img: "dark_elixir" },
+  gems:        { label: "Gems",        color: "#7fd13b", img: "gem" },
 };
-const resIcon = k => `<svg class="res-icon" viewBox="0 0 24 24" aria-hidden="true">${RES[k]?.icon ?? ""}</svg>`;
+const resIcon = k => RES[k] ? `<img class="res-icon" src="/img/${RES[k].img}.png" alt="" title="${RES[k].label}">` : "";
+const lv = (n, max) => Math.min(max, Math.max(1, Math.round(n) || 1));
+const ART = {
+  th: n => `/img/th_${lv(n, 18)}.png`, lab: n => `/img/lab_${lv(n, 16)}.png`,
+  pet: n => `/img/pethouse_${lv(n, 12)}.png`, hut: n => `/img/builderhut_${lv(n, 9)}.png`,
+  heroHall: n => `/img/herohall_${lv(n, 11)}.png`, builder: "/img/builder.png",
+};
+function setImg(el, src, attr = "src") {   // only touch the DOM when it changes
+  if (el && el.getAttribute(attr) !== src) el.setAttribute(attr, src);
+}
 const resName = r => ({ Gold: "gold", Elixir: "elixir", DarkElixir: "dark_elixir" }[r] || r);
 
 async function api(path, body) {
@@ -209,7 +219,6 @@ function attachSparkHover(el, points, key, label) {
 
 function renderTiles() {
   const st = S.state, pts = S.history?.points || [];
-  const series = getComputedStyle(document.documentElement).getPropertyValue("--series-1").trim();
   $("#tiles").innerHTML = Object.keys(RES).map(k => {
     const v = st.resources?.[k], before = st.resources_before?.[k];
     let delta = "";
@@ -218,11 +227,11 @@ function renderTiles() {
       const cls = d > 0 ? "up" : d < 0 ? "down" : "";
       delta = `<span class="${cls}">${d > 0 ? "▲" : d < 0 ? "▼" : "•"} ${compact(Math.abs(d))}</span> vs ${dur(st.snapshot.exported_at - st.resources_before.export_ts)} earlier`;
     } else if (v == null) delta = "not read at the last capture";
-    return `<div class="card tile" data-res="${k}">
+    return `<div class="card tile" data-res="${k}" style="--res:${RES[k].color}">
       <div class="tile-label">${resIcon(k)}${RES[k].label}</div>
       <div class="tile-value num" title="${v == null ? "" : nf.format(v)}">${v == null ? "–" : compact(v)}</div>
       <div class="tile-delta">${delta}</div>
-      <div class="spark-wrap">${sparkline(pts, k, series)}</div></div>`;
+      <div class="spark-wrap">${sparkline(pts, k, RES[k].color)}</div></div>`;
   }).join("");
   $$("#tiles .tile").forEach(el => attachSparkHover(el, pts, el.dataset.res, RES[el.dataset.res].label));
 }
@@ -246,6 +255,7 @@ function renderBuilders() {
   const busy = b.jobs.filter(j => j.ends_at > t && !j.extra).length;   // Goblin jobs: not a real builder
   const free = Math.max(0, b.total - busy);
   $("#free-figure").innerHTML = `${free} <small>/ ${b.total}</small>`;
+  $("#free-figure").classList.toggle("attention", free > 0);
   $("#free-caption").textContent = free === 1 ? "builder free" : "builders free";
   $("#builders-source").textContent = "real builders only (the gem-paid Goblin Builder is never counted)";
   $("#builder-meter").innerHTML = Array.from({ length: b.total }, (_, i) =>
@@ -258,8 +268,10 @@ function renderBuilders() {
   $("#next-free-at").textContent = free ? `${free} idle` : known ? clock(nxt) : "";
   const active = b.jobs.filter(j => j.ends_at > t);
   const idle = Array.from({ length: free }, () => `<div class="lane idle">
-      <div><div class="lane-name"><span class="status-label"><span class="dot good"></span>Idle</span></div>
-      <div class="lane-sub">Ready for the next upgrade</div></div><div></div><div></div></div>`);
+      <img src="${ART.builder}" alt="">
+      <div><div class="lane-name">Builder free</div>
+      <div class="lane-sub">Ready for the next upgrade from the queue</div></div>
+      <div><button class="btn small" data-goto="queue">Queue</button></div></div>`);
   $("#builder-lanes").innerHTML = idle.join("") + active.map(laneHTML).join("");
   $("#builder-table").innerHTML = `<table class="data"><thead><tr><th>Upgrade</th><th>Level</th>
       <th>Finishes</th><th class="num">Remaining</th></tr></thead><tbody>${
@@ -267,7 +279,7 @@ function renderBuilders() {
         <td>${clock(j.ends_at)}</td><td class="num">${dur(j.ends_at - t)}</td></tr>`).join("")}</tbody></table>`;
 }
 
-function miniList(el, jobs, emptyText) {
+function miniList(el, jobs, emptyText, attention) {
   const t = now();
   const live = jobs.filter(j => j.ends_at > t);
   el.innerHTML = live.length ? live.map(j => {
@@ -276,7 +288,81 @@ function miniList(el, jobs, emptyText) {
     return `<div class="mini-item"><div><b>${esc(j.name)}</b> <span class="muted">${j.from} → ${j.to}</span>${tags}</div>
       <div class="num" style="text-align:right"><span data-countdown="${j.ends_at}">–</span><div class="muted" style="font-size:12px">${clock(j.ends_at)}</div></div>
       <div class="bar"><i data-start="${start ?? ""}" data-end="${j.ends_at}"></i></div></div>`;
-  }).join("") : `<div class="empty">${emptyText}</div>`;
+  }).join("") : attention ? `<div class="empty attention"><span class="dot critical pulse"></span>${emptyText}</div>`
+                         : `<div class="empty">${emptyText}</div>`;
+}
+
+// Real slots of one worker (the gem-paid Goblin jobs never count).
+function workerStatus(w) {
+  const st = S.state, t = now();
+  const jobs = w === "builder" ? st.builders.jobs : w === "lab" ? st.lab : st.pets;
+  const total = st.workers?.[w]?.total ?? (w === "builder" ? st.builders.total : 0);
+  const live = (jobs || []).filter(j => j.ends_at > t && !j.extra).sort((a, b) => a.ends_at - b.ends_at);
+  const busy = Math.min(total, live.length);
+  const free = Math.max(0, total - busy);
+  return { total, busy, free, live, next: free || !live.length ? null : live[0].ends_at };
+}
+
+function renderPlayer() {
+  const st = S.state, s = st.snapshot, p = st.player || {};
+  const th = s.town_hall;
+  setImg($("#th-img"), ART.th(th));
+  $("#th-img").alt = `Town Hall ${th}`;
+  setImg($("#brand-img"), ART.th(th));
+  setImg($("#favicon"), ART.th(th), "href");
+  setImg($("#lab-head-img"), ART.lab(s.lab_level));
+  setImg($("#pet-head-img"), ART.pet(s.pet_house_level));
+  $("#p-name").textContent = p.name || "Chief";
+  $("#p-xp").textContent = p.xp ?? "";
+  $("#p-xp").classList.toggle("hidden", p.xp == null);
+  $("#p-tag").textContent = s.tag;
+  $("#p-clan").innerHTML = p.clan ? `<span style="opacity:.7">Clan</span><b>${esc(p.clan)}</b>` : "";
+  const badge = (img, label, level) => `<span class="lvl-badge"><img src="${img}" alt="">${label} <b>${level}</b></span>`;
+  const huts = s.builder_huts || [];
+  $("#p-badges").innerHTML = [
+    badge(ART.th(th), "Town Hall", th),
+    s.hero_hall ? badge(ART.heroHall(s.hero_hall), "Hero Hall", s.hero_hall) : "",
+    s.lab_level ? badge(ART.lab(s.lab_level), "Laboratory", s.lab_level) : "",
+    s.pet_house_level ? badge(ART.pet(s.pet_house_level), "Pet House", s.pet_house_level) : "",
+    badge(huts.length ? ART.hut(huts[0]) : ART.builder, "Builders", st.workers?.builder?.total ?? st.builders.total),
+  ].join("");
+  const gems = st.resources?.gems;
+  $("#p-gems").textContent = gems == null ? "–" : nf.format(gems);
+  $("#p-sync").textContent = `Synced ${ago(s.exported_at)} · game ${s.game_version || "?"}`;
+}
+
+const WORKER_CARDS = [
+  { w: "builder", title: "Builders", art: s => (s.builder_huts || []).length ? ART.hut(s.builder_huts[0]) : ART.builder,
+    level: () => "", idle: n => n === 1 ? "builder free" : "builders free", none: "No builders" },
+  { w: "lab", title: "Laboratory", art: s => ART.lab(s.lab_level), level: s => s.lab_level ? `level ${s.lab_level}` : "",
+    idle: () => "idle", none: "No laboratory yet" },
+  { w: "pet_house", title: "Pet House", art: s => ART.pet(s.pet_house_level),
+    level: s => s.pet_house_level ? `level ${s.pet_house_level}` : "", idle: () => "idle", none: "No pet house yet" },
+];
+function renderStatusCards() {
+  const s = S.state.snapshot;
+  $("#status-cards").innerHTML = WORKER_CARDS.map(c => {
+    const ws = workerStatus(c.w);
+    const cls = !ws.total ? "none" : ws.free ? "attention" : "busy";
+    const many = ws.total > 1;
+    const count = !ws.total ? `<b>–</b>`
+      : many ? `<b>${ws.free}</b><span>/ ${ws.total} ${c.idle(ws.free)}</span>`
+      : `<b>${ws.free ? "Idle" : "Busy"}</b>`;
+    let state;
+    if (!ws.total) state = c.none;
+    else if (ws.free) state = (many ? `${ws.free} available · ${ws.busy} working · ` : "Nothing in progress · ")
+      + `<a href="#queue" data-goto="queue">plan an upgrade</a>`;
+    else if (many) state = `All ${ws.total} working · next free in <b class="num" data-countdown="${ws.next}">${dur(ws.next - now())}</b>`;
+    else state = `${esc(ws.live[0].name)} → ${ws.live[0].to} · <b class="num" data-countdown="${ws.next}">${dur(ws.next - now())}</b> left`;
+    const pips = ws.total ? `<div class="slot-pips">${Array.from({ length: ws.total }, (_, i) =>
+      `<i class="${i < ws.busy ? "busy" : "free"}"></i>`).join("")}</div>` : "";
+    return `<div class="scard ${cls}" data-worker="${c.w}">
+      ${cls === "attention" ? `<div class="ribbon">${many ? "FREE" : "IDLE"}</div>` : ""}
+      <div class="scard-art"><img src="${c.art(s)}" alt="${c.title}"></div>
+      <div><div class="scard-title">${c.title} <span class="lv">${c.level(s)}</span></div>
+        <div class="scard-count">${count}</div>
+        <div class="scard-state">${state}</div>${pips}</div></div>`;
+  }).join("");
 }
 
 function renderHelpers() {
@@ -393,6 +479,15 @@ function renderDashTimeline() {
   timeline($("#dash-timeline"), rows, t - 1800, t + 72 * 3600);
 }
 
+function renderWorkers() {
+  const st = S.state;
+  renderStatusCards();
+  renderBuilders();
+  miniList($("#lab-list"), st.lab, "Laboratory idle: ready to research", workerStatus("lab").total > 0);
+  miniList($("#pet-list"), st.pets, st.snapshot.pet_house_level ? "Pet House idle: ready to train a pet" : "No pet house yet",
+           workerStatus("pet_house").total > 0);
+}
+
 function renderDashboard() {
   const st = S.state;
   if (!st) return;
@@ -400,10 +495,9 @@ function renderDashboard() {
     $("#tiles").innerHTML = `<div class="card" style="grid-column:1/-1">No village snapshot yet. Press <b>Capture now</b>.</div>`;
     return;
   }
+  renderPlayer();
   renderTiles();
-  renderBuilders();
-  miniList($("#lab-list"), st.lab, "Laboratory idle");
-  miniList($("#pet-list"), st.pets, "Pet House idle");
+  renderWorkers();
   renderHelpers();
   renderFacts();
   renderFreeHistory();
@@ -426,10 +520,11 @@ function tick() {
     const s = +el.dataset.start, e = +el.dataset.end;
     el.style.width = s ? `${Math.min(100, Math.max(2, (t - s) / (e - s) * 100)).toFixed(1)}%` : "4%";
   });
-  // A job just finished: refresh the builder view without waiting for the poll.
+  // A job just finished: refresh the worker views without waiting for the poll.
   if (S.state?.builders && S.page === "dashboard") {
-    const busy = S.state.builders.jobs.filter(j => j.ends_at > t).length;
-    if (busy !== S._lastBusy) { S._lastBusy = busy; if (S._rendered) renderBuilders(); }
+    const busy = ["builder", "lab", "pet_house"].map(w => workerStatus(w).busy)
+      .concat(S.state.builders.jobs.filter(j => j.ends_at > t).length).join();
+    if (busy !== S._lastBusy) { S._lastBusy = busy; if (S._rendered) renderWorkers(); }
     S._rendered = true;
   }
 }

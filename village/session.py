@@ -51,7 +51,8 @@ def _save(store, cap, game):
     and costs through the latest snapshot's version."""
     version = game.gamedata.version if game.gamedata else None
     return store.save_snapshot(cap.snapshot, cap.resources, game_version=version,
-                               captured_at=cap.home_at, counter=cap.counter)
+                               captured_at=cap.home_at, counter=cap.counter,
+                               player=getattr(cap, "player", None))
 
 
 def _state(cap):

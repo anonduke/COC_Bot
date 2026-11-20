@@ -6,13 +6,13 @@
 <meta name="color-scheme" content="dark light">
 <title>Village Control</title>
 <link rel="stylesheet" href="/app.css">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%233987e5'/%3E%3Cpath d='M9 22l7-12 7 12z' fill='white'/%3E%3C/svg%3E">
+<link rel="icon" id="favicon" href="/img/builder.png">
 </head>
 <body>
 <div class="app">
   <nav class="sidebar" aria-label="Sections">
     <div class="brand">
-      <div class="brand-mark">V</div>
+      <div class="brand-mark"><img id="brand-img" src="/img/builder.png" alt=""></div>
       <div><div class="brand-name">Village Control</div><div class="brand-sub" id="brand-sub">COC bot</div></div>
     </div>
     <button class="nav-btn active" data-page="dashboard"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg><span>Dashboard</span></button>
@@ -22,6 +22,7 @@
     <button class="nav-btn" data-page="settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg><span>Settings</span></button>
     <button class="nav-btn" data-page="notifications"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 8a6 6 0 1 1 12 0c0 7 3 8 3 8H3s3-1 3-8"/><path d="M10 20a2 2 0 0 0 4 0"/></svg><span>Alerts</span><span class="nav-badge hidden" id="nav-unread">0</span></button>
     <div class="sidebar-foot" id="foot">—</div>
+    <div class="fan-note">Unofficial fan tool, not endorsed by Supercell. Game artwork from the Supercell Fan Kit, per Supercell's Fan Content Policy.</div>
   </nav>
 
   <main class="main">
@@ -40,11 +41,27 @@
 
     <!-- ================= DASHBOARD ================= -->
     <section id="page-dashboard">
-      <div class="grid cols-4" id="tiles"></div>
+      <div class="banner" id="player-banner">
+        <div class="banner-th"><img id="th-img" src="/img/builder.png" alt="Town Hall"></div>
+        <div>
+          <div class="banner-kicker"><span class="xp" id="p-xp" title="Experience level">–</span><span id="p-tag"></span></div>
+          <div class="player-name" id="p-name">Chief</div>
+          <div class="player-clan" id="p-clan"></div>
+          <div class="banner-badges" id="p-badges"></div>
+        </div>
+        <div class="banner-side">
+          <div class="gem-count" title="Gems (the bot never spends them)"><img src="/img/gem.png" alt=""><span class="num" id="p-gems">–</span></div>
+          <div class="banner-sync" id="p-sync"></div>
+        </div>
+      </div>
+
+      <div class="status-row section-gap" id="status-cards"></div>
+
+      <div class="grid cols-4 section-gap" id="tiles"></div>
 
       <div class="grid main-split section-gap">
         <div class="card">
-          <div class="card-head"><h2>Builders</h2><span class="sub" id="builders-source"></span>
+          <div class="card-head"><img class="head-art" src="/img/builder.png" alt=""><h2>Builders</h2><span class="sub" id="builders-source"></span>
             <span class="right"><button class="btn small ghost" id="toggle-builder-table">Table view</button></span></div>
           <div class="hero-row">
             <div>
@@ -64,11 +81,11 @@
 
         <div class="grid">
           <div class="card">
-            <div class="card-head"><h2>Laboratory</h2></div>
+            <div class="card-head"><img class="head-art" id="lab-head-img" src="/img/lab_1.png" alt=""><h2>Laboratory</h2></div>
             <div class="mini-list" id="lab-list"></div>
           </div>
           <div class="card">
-            <div class="card-head"><h2>Pet House</h2></div>
+            <div class="card-head"><img class="head-art" id="pet-head-img" src="/img/pethouse_1.png" alt=""><h2>Pet House</h2></div>
             <div class="mini-list" id="pet-list"></div>
           </div>
           <div class="card">

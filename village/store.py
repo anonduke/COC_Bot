@@ -166,9 +166,12 @@ class Store:
             self.db.executescript(f"BEGIN;\n{sql}\nPRAGMA user_version = {i};\nCOMMIT;")
 
     def save_snapshot(self, snapshot, resources=None, game_version=None, captured_at=None,
-                      counter=None):
+                      counter=None, player=None):
         """Store a snapshot; returns its id. Saving the same export twice
-        (same tag and timestamp) returns the existing id."""
+        (same tag and timestamp) returns the existing id. `player` (name,
+        clan, xp read from the home screen) is kept in kv "player"."""
+        if player:
+            self.kv_set("player", dict(player, tag=snapshot.tag))
         r = resources or Resources()
         free, total = counter if counter else (None, None)
         with self.db:

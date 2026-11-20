@@ -145,6 +145,36 @@ class BasicWebTest(WebTest):
         # 6 real builders (Goblin not counted); 7 jobs incl. the Goblin's
         self.assertEqual((b["total"], b["source"], len(b["jobs"])), (6, "export", 7))
 
+    def test_state_levels_for_the_artwork(self):
+        snap = self.api("/api/state")[1]["snapshot"]
+        huts = snap["builder_huts"]
+        self.assertEqual(len(huts), 5)                  # B.O.B's hut is not a Builder's Hut
+        self.assertEqual(huts, sorted(huts, reverse=True))
+        self.assertTrue(snap["lab_level"] and snap["pet_house_level"])
+
+    def test_player_profile(self):
+        s = Store(self.db)
+        s.kv_set("player", {"name": "Other", "clan": None, "xp": 5, "tag": "#ELSEWHERE"})
+        self.assertEqual(self.api("/api/state")[1]["player"]["name"], None)   # other village
+        snap = parse_export(export_text(load_raw()))
+        s.save_snapshot(snap, player={"name": "RAHMAN -iv", "clan": "phenomenal", "xp": 196})
+        s.close()
+        p = self.api("/api/state")[1]["player"]
+        self.assertEqual((p["name"], p["clan"], p["xp"]), ("RAHMAN -iv", "phenomenal", 196))
+        self.assertEqual(self.api("/api/settings", {"player_name": " RAHMAN - IV "})[0], 200)
+        p = self.api("/api/state")[1]["player"]
+        self.assertEqual((p["name"], p["read_name"]), ("RAHMAN - IV", "RAHMAN -iv"))
+        self.assertEqual(self.api("/api/settings", {"player_name": "x" * 31})[0], 400)
+        self.assertEqual(self.api("/api/settings", {"player_name": ""})[0], 200)
+
+    def test_artwork_is_served_and_cached(self):
+        with urllib.request.urlopen(self.base + "/img/th_18.png", timeout=10) as r:
+            self.assertEqual(r.headers.get("Content-Type"), "image/png")
+            self.assertIn("max-age", r.headers.get("Cache-Control"))
+            self.assertEqual(r.read()[1:4], b"PNG")
+        with urllib.request.urlopen(self.base + "/app.js", timeout=10) as r:
+            self.assertEqual(r.headers.get("Cache-Control"), "no-store")
+
     def test_history_and_status(self):
         self.assertEqual(self.api("/api/history?hours=10000000")[0], 200)
         status, st = self.api("/api/status")
