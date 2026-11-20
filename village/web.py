@@ -18,8 +18,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 from . import adb, gamedata
-from .builders import forecast
-from .catalog import HERO_HALL, TOWN_HALL, catalog, max_level, preview, step
+from .builders import WORKERS, forecast
+from .catalog import HERO_HALL, TOWN_HALL, WORKER_NAMES, cap, catalog, preview, step
 from .settings import SETTINGS, validate
 from .store import Store
 
@@ -132,8 +132,11 @@ def state_payload(store):
         "resources_before": dict(day_ago) if day_ago else None,
         "builders": {"total": f.total, "source": f.total_source, "free_now": f.free(now),
                      "next_free_at": f.next_free_at(now), "jobs": builders},
-        "lab": [_job_dict(gd, j, "lab") for j in snap.jobs("lab")],
-        "pets": [_job_dict(gd, j, "pet_house") for j in snap.jobs("pet_house")],
+        "lab": [_job_dict(gd, j, "lab") for j in forecast(snap, gd, kind="lab").jobs],
+        "pets": [_job_dict(gd, j, "pet_house") for j in forecast(snap, gd, kind="pet_house").jobs],
+        "workers": {w: {"total": fw.total, "free_now": fw.free(now),
+                        "next_free_at": fw.next_free_at(now)}
+                    for w in WORKERS for fw in [forecast(snap, gd, kind=w)]},
         "helpers": helpers,
         "counter": stored.counter,
         "unread": store.unread_count(),
@@ -169,34 +172,37 @@ def plan_payload(store):
     gd = game_data(stored.game_version) if stored else None
     if stored is None or gd is None:
         return {"items": [dict(i, name=f"#{i['data_id']}") for i in items], "schedule": [],
-                "current": [], "builders": 0, "now": time.time()}
+                "current": [], "builders": 0, "slots": {}, "worker_names": WORKER_NAMES,
+                "now": time.time()}
     snap = stored.snapshot
-    th, hh = snap.level_of(TOWN_HALL) or 1, snap.level_of(HERO_HALL)
     now = time.time()
-    f = forecast(snap, gd, stored.counter)
-    planned, lanes = preview(snap, gd, items, f, now, PREVIEW_STEPS)
+    fc = {w: forecast(snap, gd, kind=w) for w in WORKERS}
+    planned, lanes = preview(snap, gd, items, fc, now, PREVIEW_STEPS)
     by_item = {}
     for p in planned:
         by_item.setdefault(p.item_id, []).append(p)
+    sec_worker = {c["id"]: c["worker"] for c in catalog(snap, gd)}
     out = []
     for i in items:
         steps = by_item.get(i["id"], [])
-        cap = max_level(gd, i["data_id"], th, hh)
         cost = {}
         for p in steps:
             cost[p.step.resource] = cost.get(p.step.resource, 0) + p.step.cost
-        out.append(dict(i, name=gd.name(i["data_id"]), max_level=cap,
+        out.append(dict(i, name=gd.name(i["data_id"]), max_level=cap(gd, snap, i["data_id"]),
+                        worker=sec_worker.get(i["data_id"], "builder"),
                         steps=len(steps), work_seconds=sum(p.step.seconds for p in steps),
                         cost=cost, starts_at=steps[0].start if steps else None,
                         done_at=max((p.end for p in steps), default=None)))
     schedule = [{"item_id": p.item_id, "name": gd.name(p.step.data), "from": p.step.from_level,
-                 "to": p.step.to_level, "lane": p.lane, "start": p.start, "end": p.end,
-                 "resource": p.step.resource, "cost": p.step.cost}
-                for p in planned[:120]]
-    # Current jobs, so the timeline can show what each lane is busy with now.
+                 "to": p.step.to_level, "worker": p.worker, "lane": p.lane, "start": p.start,
+                 "end": p.end, "resource": p.step.resource, "cost": p.step.cost}
+                for p in planned[:160]]
+    # Current real jobs (Goblin jobs don't hold a real slot), per worker.
     current = [{"name": gd.name(j.data), "from": j.from_level, "to": j.from_level + 1,
-                "end": j.ends_at, "extra": j.extra} for j in f.jobs]
-    return {"items": out, "schedule": schedule, "current": current, "builders": f.total,
+                "end": j.ends_at, "worker": w} for w, f in fc.items() for j in f.real_jobs()]
+    return {"items": out, "schedule": schedule, "current": current,
+            "builders": fc["builder"].total,
+            "slots": {w: f.total for w, f in fc.items()}, "worker_names": WORKER_NAMES,
             "now": now, "truncated": len(planned) >= PREVIEW_STEPS}
 
 

@@ -11,9 +11,9 @@ H = 3600
 T0 = 1_000_000
 
 
-def make(ts, buildings=(), heroes=(), helpers=()):
+def make(ts, buildings=(), heroes=(), helpers=(), huts=5):
     raw = {"tag": "#T", "timestamp": ts,
-           "buildings": [{"data": builders.BUILDERS_HUT, "lvl": 1, "cnt": 5},
+           "buildings": [{"data": builders.BUILDERS_HUT, "lvl": 1, "cnt": huts},
                          {"data": builders.BOBS_HUT, "lvl": 1, "cnt": 1}, *buildings],
            "heroes": list(heroes), "helpers": list(helpers)}
     return parse_export(json.dumps(raw))
@@ -27,25 +27,36 @@ def apprentice_data(levels=8):
 
 
 class TotalTest(unittest.TestCase):
-    def test_fixture_total_is_seven(self):
-        # 5 huts + B.O.B + a job on the extra builder = the in-game "/7".
+    def test_goblin_builder_is_not_counted(self):
+        # Fixture: 5 huts + B.O.B = 6 real builders; the in-game "/7" also
+        # counts the gem-paid Goblin Builder, whose job has extra: true.
         snap = parse_export(export_text(load_raw()))
-        self.assertEqual(builders.total_from_export(snap), 7)
+        self.assertEqual(builders.total_from_export(snap), 6)
+        f = forecast(snap)
+        goblin = [j for j in f.jobs if j.extra]
+        self.assertEqual(len(goblin), 1)
+        self.assertEqual(f.busy(snap.timestamp), len(f.jobs) - 1)     # goblin job not busy
 
-    def test_idle_extra_builder_is_invisible_to_export(self):
-        self.assertEqual(builders.total_from_export(make(T0)), 6)
-
-    def test_counter_wins(self):
+    def test_counter_does_not_set_the_total(self):
         f = forecast(make(T0), counter=(3, 7))
-        self.assertEqual((f.total, f.total_source), (7, "counter"))
+        self.assertEqual((f.total, f.total_source), (6, "export"))
+
+    def test_lab_and_pet_house_have_one_slot(self):
+        snap = parse_export(export_text(load_raw()))
+        lab = forecast(snap, kind="lab")
+        self.assertEqual(lab.total, 1)
+        # fixture: Bowler on the Goblin Researcher (extra) + Ice Block Spell (real)
+        self.assertEqual(lab.busy(snap.timestamp), 1)
+        self.assertEqual(forecast(snap, kind="pet_house").total, 1)
 
 
 class FreeTimeTest(unittest.TestCase):
     def setUp(self):
         self.snap = make(T0, buildings=[{"data": 1000009, "lvl": 18, "timer": 2 * H}],
+                         huts=2,
                          heroes=[{"data": 28000000, "lvl": 61, "timer": 5 * H},
                                  {"data": 28000001, "lvl": 85, "timer": 1 * H}])
-        self.f = forecast(self.snap, counter=(0, 3))
+        self.f = forecast(self.snap)          # 2 huts + B.O.B = 3 builders
 
     def test_jobs_sorted_by_end(self):
         self.assertEqual([j.ends_at for j in self.f.jobs], [T0 + H, T0 + 2 * H, T0 + 5 * H])
@@ -59,7 +70,7 @@ class FreeTimeTest(unittest.TestCase):
     def test_next_free(self):
         self.assertEqual(self.f.next_free_at(T0), T0 + H)
         self.assertEqual(self.f.next_free_at(T0 + H), T0 + H)   # one already free
-        empty = BuilderForecast(T0, 0, "counter", [])
+        empty = BuilderForecast(T0, 0, "export", [])
         self.assertIsNone(empty.next_free_at(T0))
 
     def test_frees_between(self):

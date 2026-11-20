@@ -24,7 +24,7 @@ import sys
 import time
 from datetime import datetime, timedelta
 
-from .builders import forecast
+from .builders import WORKERS, forecast
 from .settings import effective
 
 TICK = 20
@@ -66,27 +66,30 @@ def next_due(now, latest, gamedata, has_work, cfg, no_progress=0, last_end=None)
         return 0, "first look at the village"
     snap = latest.snapshot
     options = []
-    f = forecast(snap, gamedata, latest.counter)
-    if has_work(snap):
+    for worker in WORKERS:
+        f = forecast(snap, gamedata, kind=worker)
+        if f.total == 0 or not has_work(snap, worker):
+            continue
+        name = "builder" if worker == "builder" else worker.replace("_", " ")
         if f.free(now) > 0:
             if f.free(latest.captured_at) > 0:
                 due = latest.captured_at                 # seen free at the last capture
             else:
-                due = min((j.ends_at for j in f.jobs if j.ends_at <= now),
+                due = min((j.ends_at for j in f.real_jobs() if j.ends_at <= now),
                           default=latest.captured_at)
-            reason = "builder free"
+            reason = f"{name} free"
             if no_progress and last_end:
                 retry = last_end + BACKOFF[min(no_progress, len(BACKOFF)) - 1]
                 if retry > due:
                     due, reason = retry, "retry (no progress last time)"
             options.append((due, reason))
         else:
-            ends = sorted(j.ends_at for j in f.jobs if j.ends_at > now)
+            ends = sorted(j.ends_at for j in f.real_jobs() if j.ends_at > now)
             if ends:
                 window = cfg["group_window_min"] * 60
                 group = [e for e in ends if e <= ends[0] + window]
-                options.append((group[-1], f"{len(group)} builder(s) free"
-                                if len(group) > 1 else "builder free"))
+                options.append((group[-1], f"{len(group)} {name}s free"
+                                if len(group) > 1 else f"{name} free"))
     options.append((latest.captured_at + cfg["health_check_hours"] * 3600, "health check"))
     return min(options)
 
@@ -131,7 +134,7 @@ class Orchestrator:
         code = self.proc.returncode
         self.log(f"session ({self.current[0]}) ended with code {code}")
         last = self.store.kv_get("last_session") or {}
-        progress = last.get("upgrades", 0) > 0 or "builder" not in self.current[0]
+        progress = last.get("upgrades", 0) > 0 or " free" not in self.current[0]
         streak = 0 if progress and code == 0 else self.store.kv_get("no_progress", 0) + 1
         self.store.kv_set("no_progress", streak)
         # A failed session leaves its due time in the past: without this the
@@ -145,8 +148,9 @@ class Orchestrator:
         from . import planner
         plan = self.store.plan()
 
-        def has_work(snap):
-            return bool(plan) and any(not c.reason for c in planner.candidates(snap, gd, plan))
+        def has_work(snap, worker=None):
+            return bool(plan) and any(not c.reason for c in
+                                      planner.candidates(snap, gd, plan, worker=worker))
         return has_work
 
     def compute(self):
@@ -156,7 +160,7 @@ class Orchestrator:
         gd = game_data(latest.game_version) if latest else None
         last = self.store.kv_get("last_session") or {}
         due, reason = next_due(self.clock(), latest, gd, self._has_work(gd, cfg) if gd else
-                               (lambda s: False), cfg, self.store.kv_get("no_progress", 0),
+                               (lambda s, w=None: False), cfg, self.store.kv_get("no_progress", 0),
                                last.get("ended_at"))
         fails = self.store.kv_get("fail_streak", {})
         if fails.get("n"):

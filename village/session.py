@@ -20,7 +20,7 @@ import traceback
 from dataclasses import dataclass, field
 
 from . import planner
-from .builders import forecast
+from .builders import WORKERS, forecast
 from .diff import diff
 from .settings import effective
 
@@ -86,6 +86,87 @@ def resolve_pending(store, snapshot_id, snapshot, out):
                 f"{'verified' if ok else 'not applied'} (resolved after interruption)")
 
 
+WORKER_LABEL = {"builder": "builder", "lab": "laboratory", "pet_house": "pet house"}
+
+
+def _run_worker(store, game, sid, cfg, worker, state, tried, dry, gems0, out, log, max_steps):
+    """Fill the free REAL slots of one worker from the queue (Goblin slots
+    are never used: the export-based forecast doesn't count them)."""
+    dry_runs = 0          # dry runs don't use a slot, so count them against `free`
+    for _ in range(max_steps):
+        cap = state["cap"]
+        free = forecast(cap.snapshot, game.gamedata, kind=worker).free(time.time())
+        if free - dry_runs < 1:
+            if not dry_runs:
+                out.add(f"no free {WORKER_LABEL[worker]}")
+            return
+        all_c = planner.candidates(cap.snapshot, game.gamedata, store.plan(),
+                                   _state(cap), _fills(cap), tried, worker=worker)
+        cands = [c for c in all_c if not c.reason]
+        if not cands:
+            out.add(f"{WORKER_LABEL[worker]}: nothing in the queue to start")
+            for c in all_c:
+                out.add(f"{c.name} {c.from_level}->{c.from_level + 1}: {c.reason}")
+            return
+        c = cands[0]
+        tried.add((c.data_id, c.from_level))
+        label = f"{c.name} {c.from_level}->{c.from_level + 1}"
+
+        if c.affordable is False and cfg["farm_enabled"] and not dry:
+            target = planner.farm_target(c, cfg["farm_margin_pct"])
+            log(f"session: farming for {label}: {c.resource} to {target:,}")
+            status, msg = game.farm({
+                "mode": "target", c.resource: target,
+                "max_attacks": cfg["farm_max_attacks"], "max_minutes": cfg["farm_max_minutes"]})
+            out.add(f"farmed for {label}: {status}, {msg}")
+            store.add_action(sid, "farm", status, c.data_id, c.name, c.from_level,
+                             detail=f"target {c.resource} {target:,}: {msg}")
+            game.ensure_ready()
+            state["cap"] = game.capture()
+            state["snap_id"] = _save(store, state["cap"], game)
+            if status not in ("done",):
+                return
+
+        if dry:
+            r = game.upgrade(c.name, c.from_level, False, worker)
+            store.add_action(sid, "dry_run", "dry_run", c.data_id, c.name, c.from_level,
+                             state["snap_id"], r.reason + "".join("\n" + p for p in r.screenshots))
+            out.add(f"dry run {label}: {'found' if r.found else 'not found'}"
+                    + ("" if r.affordable in (None, True) else ", not affordable"))
+            dry_runs += 1
+            continue
+
+        aid = store.add_action(sid, "upgrade", "intent", c.data_id, c.name, c.from_level,
+                               state["snap_id"])
+        r = game.upgrade(c.name, c.from_level, True, worker)
+        detail = r.reason + "".join("\n" + p for p in r.screenshots)
+        if not r.confirm_tapped:
+            store.update_action(aid, "skipped", detail)
+            out.add(f"{label}: not started ({r.reason})")
+            if r.found and r.affordable is False:
+                return              # not enough resources: later items are no cheaper bet
+            continue
+        cap2 = game.capture()
+        snap2 = _save(store, cap2, game)
+        ok = _verified(store, state["snap_id"], cap2.snapshot, c.data_id, c.from_level)
+        store.update_action(aid, "verified" if ok else "not_applied", detail)
+        out.add(f"{label}: {'started (verified by export)' if ok else 'NOT confirmed by export'}")
+        out.upgrades += ok
+        gems = cap2.resources.gems
+        if gems0 is not None and gems is not None and gems < gems0:
+            store.set_setting("automation_paused", True)
+            store.notify("error", "gem guard",
+                         f"Gems dropped {gems0:,} -> {gems:,} during a session: automation paused",
+                         "Check the after_confirm screenshots under Alerts / Sessions.")
+            out.add("GEM GUARD: gems dropped, automation paused")
+            out.status = "failed"
+            state["stop"] = True
+            return
+        state["cap"], state["snap_id"] = cap2, snap2
+        if not ok:
+            return
+
+
 def run_session(store, game, trigger, log=print, max_steps=10):
     out = Outcome()
     sid = store.start_session(trigger)
@@ -100,78 +181,11 @@ def run_session(store, game, trigger, log=print, max_steps=10):
         gems0 = cap.resources.gems
         tried = set()
         dry = bool(cfg["dry_run"])
-        dry_runs = 0          # dry runs don't use a builder, so count them against `free`
-
-        for _ in range(max_steps):
-            counter = cap.counter
-            free = counter[0] if counter else forecast(cap.snapshot, game.gamedata).free(time.time())
-            if free - dry_runs < 1:
-                if not dry_runs:
-                    out.add("no free builder")
+        state = {"cap": cap, "snap_id": snap_id, "stop": False}
+        for worker in WORKERS:
+            if state["stop"]:
                 break
-            all_c = planner.candidates(cap.snapshot, game.gamedata, store.plan(),
-                                       _state(cap), _fills(cap), tried)
-            cands = [c for c in all_c if not c.reason]
-            if not cands:
-                out.add("nothing in the queue to start")
-                for c in all_c:
-                    out.add(f"{c.name} {c.from_level}->{c.from_level + 1}: {c.reason}")
-                break
-            c = cands[0]
-            tried.add((c.data_id, c.from_level))
-            label = f"{c.name} {c.from_level}->{c.from_level + 1}"
-
-            if c.affordable is False and cfg["farm_enabled"] and not dry:
-                target = planner.farm_target(c, cfg["farm_margin_pct"])
-                log(f"session: farming for {label}: {c.resource} to {target:,}")
-                status, msg = game.farm({
-                    "mode": "target", c.resource: target,
-                    "max_attacks": cfg["farm_max_attacks"], "max_minutes": cfg["farm_max_minutes"]})
-                out.add(f"farmed for {label}: {status}, {msg}")
-                store.add_action(sid, "farm", status, c.data_id, c.name, c.from_level,
-                                 detail=f"target {c.resource} {target:,}: {msg}")
-                game.ensure_ready()
-                cap = game.capture()
-                snap_id = _save(store, cap, game)
-                if status not in ("done",):
-                    break
-
-            if dry:
-                r = game.upgrade(c.name, c.from_level, False)
-                store.add_action(sid, "dry_run", "dry_run", c.data_id, c.name, c.from_level,
-                                 snap_id, r.reason + "".join(f"\n{p}" for p in r.screenshots))
-                out.add(f"dry run {label}: {'found' if r.found else 'not found'}"
-                        + ("" if r.affordable in (None, True) else ", not affordable"))
-                dry_runs += 1
-                continue
-
-            aid = store.add_action(sid, "upgrade", "intent", c.data_id, c.name, c.from_level, snap_id)
-            r = game.upgrade(c.name, c.from_level, True)
-            detail = r.reason + "".join(f"\n{p}" for p in r.screenshots)
-            if not r.confirm_tapped:
-                store.update_action(aid, "skipped", detail)
-                out.add(f"{label}: not started ({r.reason})")
-                if r.found and r.affordable is False:
-                    break               # not enough resources: later items are no cheaper bet
-                continue
-            cap2 = game.capture()
-            snap2 = _save(store, cap2, game)
-            ok = _verified(store, snap_id, cap2.snapshot, c.data_id, c.from_level)
-            store.update_action(aid, "verified" if ok else "not_applied", detail)
-            out.add(f"{label}: {'started (verified by export)' if ok else 'NOT confirmed by export'}")
-            out.upgrades += ok
-            gems = cap2.resources.gems
-            if gems0 is not None and gems is not None and gems < gems0:
-                store.set_setting("automation_paused", True)
-                store.notify("error", "gem guard",
-                             f"Gems dropped {gems0:,} -> {gems:,} during a session: automation paused",
-                             "Check the after_confirm screenshots under Alerts / Sessions.")
-                out.add("GEM GUARD: gems dropped, automation paused")
-                out.status = "failed"
-                break
-            cap, snap_id = cap2, snap2
-            if not ok:
-                break
+            _run_worker(store, game, sid, cfg, worker, state, tried, dry, gems0, out, log, max_steps)
 
         if cfg["stop_emulator_between"] and game.stop_emulator:
             game.stop_emulator()
@@ -212,9 +226,9 @@ def real_game(store, log=print):
                      "dark_fill": bar_fill(img, "dark_elixir")}
         return cap
 
-    def do_upgrade(name, from_level, confirm):
+    def do_upgrade(name, from_level, confirm, worker="builder"):
         fn = upgrader.upgrade if confirm else upgrader.dry_run
-        return fn(name, from_level, log=log)
+        return fn(name, from_level, log=log, worker=worker)
 
     def do_farm(params):
         p = farm.validate(params)

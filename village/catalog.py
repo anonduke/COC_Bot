@@ -1,22 +1,33 @@
-"""What can be upgraded with builders, what each step costs, and a preview
-of how an ordered upgrade queue would play out across the builders.
+"""What can be upgraded (by builders, the laboratory and the pet house), what
+each step costs, and a preview of how an ordered upgrade queue would play out.
 
-Table semantics (verified on game 18.647.5):
+Table semantics (verified on game 18.647.5 / 19.32.4):
   buildings / traps: row L = cost and time to REACH level L (row 1 = build);
                      TownHallLevel on row L = Town Hall needed for level L.
-  heroes:            row L = cost and time to go FROM L to L+1 (last row empty);
-                     RequiredTownHallLevel / RequiredHeroTavernLevel on row L =
-                     what level L needs.
+  heroes, characters (troops + siege machines), spells, pets:
+                     row L = cost and time to go FROM L to L+1 (last row empty;
+                     live: Hog Rider row 11 = 115 000 DE, 5 d = its 11->12 dialog).
+                     Heroes: RequiredTownHallLevel / RequiredHeroTavernLevel on
+                     row L; troops/spells: LaboratoryLevel on row L; pets: the
+                     same column holds the Pet House level.
   The resource column is filled on the first row only; later rows inherit it.
-
-The queue preview is the start of the Phase 6 planner: strict queue order, the
-earliest-free builder takes the next step, no resource or farming limits yet.
 """
 from dataclasses import dataclass
 
 TOWN_HALL = 1000001
 HERO_HALL = 1000071
-BUILDER_SECTIONS = ("buildings", "traps", "heroes")
+LABORATORY = 1000007
+PET_HOUSE = 1000068
+# export section -> (worker, catalog kind)
+SECTIONS = {
+    "buildings": ("builder", "building"), "traps": ("builder", "trap"),
+    "heroes": ("builder", "hero"),
+    "units": ("lab", "troop"), "spells": ("lab", "spell"), "siege_machines": ("lab", "siege"),
+    "pets": ("pet_house", "pet"),
+}
+BUILDER_SECTIONS = tuple(SECTIONS)          # all home-village upgrade sections
+FROM_ROW_TABLES = ("heroes", "characters", "spells", "pets")
+WORKER_NAMES = {"builder": "Builders", "lab": "Laboratory", "pet_house": "Pet House"}
 
 
 @dataclass(frozen=True)
@@ -54,11 +65,12 @@ def step(gd, data_id, from_level):
     if obj is None:
         return None
     to = from_level + 1
-    if is_hero(obj):
+    if obj.table in FROM_ROW_TABLES:
         row = obj.level(from_level)
         if row is None or not row.get("UpgradeCost"):
             return None
-        return Step(data_id, from_level, to, _int(row.get("UpgradeTimeH")) * 3600,
+        secs = _int(row.get("UpgradeTimeH")) * 3600 + _int(row.get("UpgradeTimeM")) * 60
+        return Step(data_id, from_level, to, secs,
                     _resource(obj, from_level, "UpgradeResource"), _int(row.get("UpgradeCost")))
     row = obj.level(to)
     if row is None:
@@ -69,8 +81,9 @@ def step(gd, data_id, from_level):
                 _int(row.get("BuildCost")))
 
 
-def max_level(gd, data_id, th_level, hero_hall_level=None):
-    """Highest level allowed at this Town Hall (and Hero Hall for heroes)."""
+def max_level(gd, data_id, th_level, hero_hall_level=None, lab_level=None, pet_house_level=None):
+    """Highest level allowed at this Town Hall / Hero Hall / Laboratory /
+    Pet House level."""
     obj = gd.get(data_id)
     if obj is None:
         return None
@@ -80,11 +93,29 @@ def max_level(gd, data_id, th_level, hero_hall_level=None):
             ok = (_int(row.get("RequiredTownHallLevel")) <= th_level and
                   (hero_hall_level is None or
                    _int(row.get("RequiredHeroTavernLevel")) <= hero_hall_level))
+        elif obj.table == "pets":
+            ok = pet_house_level is not None and _int(row.get("LaboratoryLevel")) <= pet_house_level
+        elif obj.table in ("characters", "spells"):
+            ok = lab_level is not None and _int(row.get("LaboratoryLevel")) <= lab_level
         else:
             ok = _int(row.get("TownHallLevel")) <= th_level
         if ok:
             best = lvl
     return best
+
+
+def cap(gd, snapshot, data_id):
+    """max_level with every gating building's level taken from the snapshot."""
+    return max_level(gd, data_id, snapshot.level_of(TOWN_HALL) or 1,
+                     snapshot.level_of(HERO_HALL), snapshot.level_of(LABORATORY),
+                     snapshot.level_of(PET_HOUSE))
+
+
+def section_of(snapshot, data_id):
+    for e in snapshot.entries:
+        if e.data == data_id and e.section in SECTIONS:
+            return e.section
+    return None
 
 
 def instances(snapshot, data_id):
@@ -105,11 +136,9 @@ def instances(snapshot, data_id):
 
 def catalog(snapshot, gd):
     """Upgradable objects in the village: one dict per type."""
-    th = snapshot.level_of(TOWN_HALL) or 1
-    hh = snapshot.level_of(HERO_HALL)
     seen, out = set(), []
     for e in snapshot.entries:
-        if e.section not in BUILDER_SECTIONS or e.data in seen or e.level is None:
+        if e.section not in SECTIONS or e.data in seen or e.level is None:
             continue
         if e.parent is not None:   # Crafting Station modules
             continue
@@ -118,14 +147,16 @@ def catalog(snapshot, gd):
         if obj is None:
             continue
         levels, upgrading = instances(snapshot, e.data)
-        cap = max_level(gd, e.data, th, hh)
-        missing = sum(cap - lvl for lvl in levels if lvl < cap)
-        nxt = step(gd, e.data, levels[0]) if levels and levels[0] < cap else None
+        top = cap(gd, snapshot, e.data)
+        if not top:          # nothing unlockable at the current building levels
+            continue
+        missing = sum(top - lvl for lvl in levels if lvl < top)
+        nxt = step(gd, e.data, levels[0]) if levels and levels[0] < top else None
+        worker, kind = SECTIONS[e.section]
         out.append({
-            "id": e.data, "name": gd.name(e.data), "kind": "hero" if is_hero(obj) else
-            ("trap" if e.section == "traps" else "building"),
+            "id": e.data, "name": gd.name(e.data), "kind": kind, "worker": worker,
             "count": len(levels), "levels": levels, "upgrading": upgrading,
-            "min_level": levels[0] if levels else None, "max_level": cap,
+            "min_level": levels[0] if levels else None, "max_level": top,
             "steps_left": missing,
             "next": None if nxt is None else {"to": nxt.to_level, "seconds": nxt.seconds,
                                                "resource": nxt.resource, "cost": nxt.cost},
@@ -139,9 +170,8 @@ def expand(snapshot, gd, data_id, target_level=None, levels=None):
     for the current Town Hall/Hero Hall), lowest copy first, one level at a
     time, so copies stay even. `levels` (mutated) lets a caller carry the
     simulated levels from one queue item to the next."""
-    th = snapshot.level_of(TOWN_HALL) or 1
-    cap = max_level(gd, data_id, th, snapshot.level_of(HERO_HALL)) or 0
-    target = min(target_level or cap, cap)
+    top = cap(gd, snapshot, data_id) or 0
+    target = min(target_level or top, top)
     if levels is None:
         levels, _ = instances(snapshot, data_id)
     steps = []
@@ -159,9 +189,10 @@ def expand(snapshot, gd, data_id, target_level=None, levels=None):
 class Planned:
     item_id: int
     step: Step
-    lane: int
+    lane: int            # slot index within the worker
     start: float
     end: float
+    worker: str = "builder"
 
 
 def _copies(snapshot, data_id, now):
@@ -178,28 +209,53 @@ def _copies(snapshot, data_id, now):
     return out
 
 
-def preview(snapshot, gd, items, builder_forecast, now, horizon_steps=600):
+def preview(snapshot, gd, items, forecasts=None, now=0, horizon_steps=600):
     """Simulate the queue. `items` are dicts with id, data_id, target_level,
-    enabled, in queue order (= priority).
+    enabled, in queue order (= priority). Each worker (builders, laboratory,
+    pet house) is simulated separately with its real slots; `forecasts` is a
+    BuilderForecast (builders) or {worker: BuilderForecast}; missing workers
+    are forecast from the snapshot.
 
-    Event simulation: the earliest-free builder takes the first queue item
-    that has a copy below its target which is free at that moment (lowest
-    level copy first, so copies stay even). A copy is busy while it is being
+    Event simulation: the earliest-free slot takes the first queue item that
+    has a copy below its target which is free at that moment (lowest level
+    copy first, so copies stay even). A copy is busy while it is being
     upgraded, so one hero never gets two builders. If nothing is free yet, the
-    builder waits for whichever copy frees first. Returns (planned steps,
-    lane busy-until list); lanes start busy until their current job ends."""
-    lanes = sorted([max(now, j.ends_at) for j in builder_forecast.jobs]
-                   + [now] * max(0, builder_forecast.total - len(builder_forecast.jobs)))
-    lanes = lanes or [now]
-    th = snapshot.level_of(TOWN_HALL) or 1
-    hh = snapshot.level_of(HERO_HALL)
-    copies, targets = {}, []
+    slot waits for whichever copy frees first. Returns (planned steps sorted
+    by start, {worker: lane busy-until list}); lanes start busy until their
+    current (real, non-Goblin) job ends."""
+    from .builders import BuilderForecast, forecast
+    if isinstance(forecasts, BuilderForecast):
+        forecasts = {forecasts.kind: forecasts}
+    forecasts = dict(forecasts or {})
+    by_worker = {}
     for item in items:
         if not item.get("enabled", True):
             continue
+        sec = section_of(snapshot, item["data_id"])
+        if sec is None:
+            continue
+        by_worker.setdefault(SECTIONS[sec][0], []).append(item)
+    planned, all_lanes = [], {}
+    for worker, its in by_worker.items():
+        f = forecasts.get(worker) or forecast(snapshot, gd, kind=worker)
+        real = f.real_jobs()
+        lanes = sorted([max(now, j.ends_at) for j in real]
+                       + [now] * max(0, f.total - len(real)))
+        if not lanes:
+            continue
+        p, lanes = _simulate(snapshot, gd, its, lanes, now, horizon_steps - len(planned), worker)
+        planned += p
+        all_lanes[worker] = lanes
+    planned.sort(key=lambda x: (x.start, x.worker, x.lane))
+    return planned, all_lanes
+
+
+def _simulate(snapshot, gd, items, lanes, now, horizon_steps, worker):
+    copies, targets = {}, []
+    for item in items:
         d = item["data_id"]
-        cap = max_level(gd, d, th, hh) or 0
-        target = min(item.get("target_level") or cap, cap)
+        top = cap(gd, snapshot, d) or 0
+        target = min(item.get("target_level") or top, top)
         copies.setdefault(d, _copies(snapshot, d, now))
         targets.append((item["id"], d, target))
 
@@ -226,5 +282,5 @@ def preview(snapshot, gd, items, builder_forecast, now, horizon_steps=600):
         end = start + s.seconds
         c[0], c[1] = c[0] + 1, end
         lanes[lane] = end
-        planned.append(Planned(item_id, s, lane, start, end))
+        planned.append(Planned(item_id, s, lane, start, end, worker))
     return planned, lanes

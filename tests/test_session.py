@@ -12,6 +12,20 @@ from village.store import Resources, Store
 from village.upgrader import DryRun
 
 HUT = 1000015
+LAB = 1000007
+BARB = 4000000
+
+
+def gd_with_lab():
+    from village.gamedata import GameObject
+    g = gd()
+    rows = [{"Name": "Barbarian" if i == 0 else "", "LaboratoryLevel": "1",
+             "UpgradeTimeH": "2", "UpgradeCost": "100", "UpgradeResource": "Elixir" if i == 0 else ""}
+            for i in range(5)]
+    g.objects[BARB] = GameObject(BARB, "characters", "Barbarian", rows)
+    g.objects[LAB] = GameObject(LAB, "buildings", "Laboratory",
+                                [{"Name": "Laboratory", "TownHallLevel": "1"}] * 5)
+    return g
 
 
 class FakeGame:
@@ -22,9 +36,16 @@ class FakeGame:
         self.raw = raw
         self.res = {"gold": gold, "elixir": 0, "dark_elixir": dark, "gems": gems}
         self.free, self.total = builders
+        # Real builders come from the export: huts = total, and every builder
+        # that isn't free is busy with an unrelated (unknown-object) job.
+        hut = next(b for b in raw["buildings"] if b["data"] == HUT)
+        hut["cnt"] = self.total
+        for i in range(self.total - self.free):
+            raw["buildings"].append({"data": 1000990 + i, "lvl": 1, "timer": 99999})
         self.upgrade_takes, self.popup, self.dark_fill = upgrade_takes, popup, dark_fill
         self.calls = []
-        self.ts = 1_000_000
+        self.workers = []
+        self.ts = int(__import__('time').time())   # busy jobs are judged against the real clock
         self.game = session.Game(self.ensure_ready, self.capture, self.upgrade, self.farm, gd())
 
     def ensure_ready(self):
@@ -44,16 +65,17 @@ class FakeGame:
         return cap
 
     def _find(self, data_id):
-        for sec in ("buildings", "heroes"):
+        for sec in ("buildings", "heroes", "units"):
             for e in self.raw.get(sec, []):
                 if e["data"] == data_id and "timer" not in e:
                     return sec, e
         return None, None
 
-    def upgrade(self, name, from_level, confirm):
+    def upgrade(self, name, from_level, confirm, worker="builder"):
         self.calls.append(("upgrade", name, from_level, confirm))
         r = DryRun(name, from_level, found=True, affordable=True)
-        data_id = {"Cannon": CANNON, "Barbarian King": KING}[name]
+        data_id = {"Cannon": CANNON, "Barbarian King": KING, "Barbarian": BARB}[name]
+        self.workers.append(worker)
         if not confirm:
             r.reason = "dry run"
             return r
@@ -135,6 +157,20 @@ class SessionTest(unittest.TestCase):
         ups = [c for c in fake.calls if isinstance(c, tuple) and c[0] == "upgrade"]
         self.assertEqual(len(ups), 1)
 
+    def test_lab_upgrade_uses_the_lab_and_ignores_the_goblin_researcher(self):
+        # Lab built; a Goblin Researcher job (extra) runs; the real lab slot is free.
+        raw = village(units=[{"data": BARB, "lvl": 1},
+                             {"data": BARB + 1, "lvl": 3, "timer": 50000, "extra": True}])
+        raw["buildings"].append({"data": LAB, "lvl": 3, "cnt": 1})
+        fake = FakeGame(raw, gold=0, builders=(0, 2))
+        fake.res["elixir"] = 1_000
+        fake.game.gamedata = gd_with_lab()
+        self.store.add_plan_item(BARB)
+        sid, out = self.run_with(fake)
+        self.assertEqual(fake.workers, ["lab"])
+        self.assertEqual([a["status"] for a in self.store.actions(session_id=sid)], ["verified"])
+        self.assertIn("no free builder", out.lines)
+
     def test_not_applied_is_journaled_and_stops(self):
         self.store.add_plan_item(KING)
         self.store.add_plan_item(CANNON)
@@ -159,7 +195,7 @@ class SessionTest(unittest.TestCase):
         fake = FakeGame(village(), dark=10, dark_fill=0.5)
         sid, out = self.run_with(fake)
         self.assertFalse([c for c in fake.calls if isinstance(c, tuple)])
-        self.assertIn("nothing in the queue to start", out.lines)
+        self.assertIn("builder: nothing in the queue to start", out.lines)
 
     def test_no_free_builder_does_nothing(self):
         self.store.add_plan_item(KING)

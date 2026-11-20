@@ -289,8 +289,42 @@ def _at(img, name, pos):
     return (x, y) if ok else None
 
 
+# The Build button's side panel has one tab per worker (bottom row).
+PANEL_TITLES = {"builder": "builder_panel_title.png",      # "Buildings & Heroes"
+                "lab": "panel_title_lab.png",               # "Army Upgrades"
+                "pet_house": "panel_title_pets.png"}        # "Hero Pets"
+TAB_TAP = {"builder": (1222, 855), "lab": (1330, 855), "pet_house": (1545, 855)}
+
+
+def panel_tab(img):
+    """Which tab of the side panel is open, or None if the panel isn't."""
+    for worker, name in PANEL_TITLES.items():
+        if _at(img, name, PANEL_TITLE_POS):
+            return worker
+    return None
+
+
 def panel_open(img):
-    return _at(img, "builder_panel_title.png", PANEL_TITLE_POS)
+    pos = None
+    for name in PANEL_TITLES.values():
+        pos = _at(img, name, PANEL_TITLE_POS)
+        if pos:
+            break
+    return pos
+
+
+def open_tab(worker, serial, log):
+    """Switch the open panel to `worker`'s tab; True once its title shows."""
+    img = adb.screencap(serial)
+    if panel_tab(img) == worker:
+        return True
+    if panel_tab(img) is None:
+        return False
+    adb.tap(*TAB_TAP[worker], serial=serial)
+    found, _ = _wait(lambda im: panel_tab(im) == worker, 5, serial)
+    if not found:
+        log(f"could not switch the panel to the {worker} tab")
+    return bool(found)
 
 
 def dialog_open(img):
@@ -433,28 +467,31 @@ def _confirm(result, name, want, serial, log, shot_dir):
 
 # --- find, then dry run or confirm ------------------------------------------------
 
-def dry_run(name, from_level, serial=adb.SERIAL, log=print, shot_dir=SHOT_DIR):
-    """Find the upgrade `name` from_level -> from_level + 1 in the Builder menu,
-    open its dialog, record it, close it. Never confirms. Returns DryRun."""
+def dry_run(name, from_level, serial=adb.SERIAL, log=print, shot_dir=SHOT_DIR, worker="builder"):
+    """Find the upgrade `name` from_level -> from_level + 1 in the Build
+    panel (on `worker`'s tab: builder / lab / pet_house), open its dialog,
+    record it, close it. Never confirms. Returns DryRun."""
     with capture_lock(wait=30):
-        return _run(name, from_level, serial, log, shot_dir, confirm=False)
+        return _run(name, from_level, serial, log, shot_dir, confirm=False, worker=worker)
 
 
-def upgrade(name, from_level, serial=adb.SERIAL, log=print, shot_dir=SHOT_DIR):
+def upgrade(name, from_level, serial=adb.SERIAL, log=print, shot_dir=SHOT_DIR, worker="builder"):
     """Like dry_run, but confirms the upgrade when every check passes and a
     builder is free. result.confirmed = the dialog closed after Confirm."""
     with capture_lock(wait=30):
-        return _run(name, from_level, serial, log, shot_dir, confirm=True)
+        return _run(name, from_level, serial, log, shot_dir, confirm=True, worker=worker)
 
 
-def _run(name, from_level, serial, log, shot_dir, confirm):
+def _run(name, from_level, serial, log, shot_dir, confirm, worker="builder"):
     result = DryRun(name, from_level)
     want = from_level + 1
     os.makedirs(shot_dir, exist_ok=True)
     if not ensure_home(serial, log):
         result.reason = "could not reach the home screen"
         return result
-    if confirm:
+    if confirm and worker == "builder":
+        # (lab / pet house: the session checked the real free slot in a fresh
+        # export; a Goblin Researcher offer after Confirm is caught below.)
         counter = read_real_builder_counter(adb.screencap(serial))
         if not counter or counter[0] < 1:
             # Confirm with no free builder opens a gem-priced Goblin Builder offer.
@@ -465,7 +502,11 @@ def _run(name, from_level, serial, log, shot_dir, confirm):
     adb.tap(*COUNTER_TAP, serial=serial)
     pos, img = _wait(panel_open, 6, serial)
     if not pos:
-        result.reason = "the Buildings & Heroes panel did not open"
+        result.reason = "the Build panel did not open"
+        return result
+    if not open_tab(worker, serial, log):
+        close_panel(serial, log)
+        result.reason = f"could not open the {worker} tab of the Build panel"
         return result
 
     tried = []   # (normalized name, row_key) of rows already opened

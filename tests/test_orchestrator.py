@@ -23,14 +23,15 @@ def ts(hhmm, day=15):
 
 def latest(now, jobs=(), free=1, total=2, captured_ago=0):
     raw = {"tag": "#T", "timestamp": int(now - 10),
-           "buildings": [{"data": TH, "lvl": 3, "cnt": 1}],
+           "buildings": [{"data": TH, "lvl": 3, "cnt": 1},
+                         {"data": 1000015, "lvl": 1, "cnt": total}],     # real builders = huts
            "heroes": [{"data": KING, "lvl": 1, "timer": int(j - now + 10)} for j in jobs]}
     return SimpleNamespace(snapshot=parse_export(json.dumps(raw)), counter=(free, total),
                            captured_at=now - captured_ago)
 
 
-WORK = lambda s: True        # noqa: E731
-NO_WORK = lambda s: False    # noqa: E731
+WORK = lambda s, w=None: True        # noqa: E731
+NO_WORK = lambda s, w=None: False    # noqa: E731
 
 
 class ActiveHoursTest(unittest.TestCase):

@@ -10,7 +10,7 @@ is certain, "not affordable" is a hint and the upgrade dialog decides.
 """
 from dataclasses import dataclass
 
-from .catalog import BUILDER_SECTIONS, HERO_HALL, TOWN_HALL, max_level, step
+from .catalog import SECTIONS, cap, section_of, step
 
 RESOURCE_KEYS = {"Gold": "gold", "Elixir": "elixir", "DarkElixir": "dark_elixir"}
 FILL_KEYS = {"gold": "gold_fill", "elixir": "elixir_fill", "dark_elixir": "dark_fill"}
@@ -28,6 +28,7 @@ class Candidate:
     affordable: bool | None  # None = resource unknown
     capacity: int | None   # storage capacity estimate, if known
     reason: str = ""       # why it can't be done even after farming
+    worker: str = "builder"  # builder / lab / pet_house
 
 
 def capacity(value, fill):
@@ -37,21 +38,25 @@ def capacity(value, fill):
     return int(value / fill)
 
 
-def candidates(snapshot, gd, plan_items, resources=None, fills=None, exclude=()):
+def candidates(snapshot, gd, plan_items, resources=None, fills=None, exclude=(), worker=None):
     """Candidates in queue order. `resources` {gold, elixir, dark_elixir},
     `fills` {gold_fill, ...}; `exclude` (data_id, from_level) keys already
-    tried in this session."""
-    th = snapshot.level_of(TOWN_HALL) or 1
-    hh = snapshot.level_of(HERO_HALL)
+    tried in this session; `worker` limits to builder / lab / pet_house items."""
     out = []
     for item in plan_items:
         if not item.get("enabled", True):
             continue
         d = item["data_id"]
-        cap = max_level(gd, d, th, hh) or 0
-        target = min(item.get("target_level") or cap, cap)
+        sec = section_of(snapshot, d)
+        if sec is None:
+            continue
+        w = SECTIONS[sec][0]
+        if worker and w != worker:
+            continue
+        top = cap(gd, snapshot, d) or 0
+        target = min(item.get("target_level") or top, top)
         idle = sorted(lvl for e in snapshot.entries
-                      if e.data == d and e.section in BUILDER_SECTIONS and e.level is not None
+                      if e.data == d and e.section in SECTIONS and e.level is not None
                       and not e.upgrading for lvl in [e.level] * e.count)
         idle = [lvl for lvl in idle if lvl < target and (d, lvl) not in exclude]
         if not idle:
@@ -66,7 +71,7 @@ def candidates(snapshot, gd, plan_items, resources=None, fills=None, exclude=())
         if cap_est is not None and s.cost > cap_est:
             reason = f"costs {s.cost:,} {res}, more than the storage holds (~{cap_est:,})"
         out.append(Candidate(item["id"], d, gd.name(d), idle[0], s.seconds, res, s.cost,
-                             None if have is None else have >= s.cost, cap_est, reason))
+                             None if have is None else have >= s.cost, cap_est, reason, w))
     return out
 
 

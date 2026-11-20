@@ -78,7 +78,7 @@ const hideTip = () => tip.classList.add("hidden");
 document.addEventListener("scroll", hideTip, true);
 
 // ---------- navigation ----------
-const TITLES = { dashboard: "Dashboard", queue: "Builder queue", automation: "Automation", attack: "Attack", settings: "Settings", notifications: "Alerts" };
+const TITLES = { dashboard: "Dashboard", queue: "Upgrade queue", automation: "Automation", attack: "Attack", settings: "Settings", notifications: "Alerts" };
 function go(page) {
   if (!TITLES[page]) page = "dashboard";
   S.page = page;
@@ -230,7 +230,7 @@ function renderTiles() {
 function laneHTML(j) {
   const start = j.duration ? j.ends_at - j.duration : null;
   const tags = [];
-  if (j.extra) tags.push(`<span class="tag" title="Runs on the extra (7th) builder">extra builder</span>`);
+  if (j.extra) tags.push(`<span class="tag" title="Started with the gem-paid Goblin Builder; not counted as a builder">Goblin</span>`);
   if (j.helper) tags.push(`<span class="tag" title="Builder's Apprentice assigned; plain timer ends ${clock(j.timer_end)}">apprentice</span>`);
   return `<div class="lane">
     <div><div class="lane-name">${esc(j.name)}</div>
@@ -243,15 +243,14 @@ function laneHTML(j) {
 function renderBuilders() {
   const b = S.state.builders;
   const t = now();
-  const busy = b.jobs.filter(j => j.ends_at > t).length;
+  const busy = b.jobs.filter(j => j.ends_at > t && !j.extra).length;   // Goblin jobs: not a real builder
   const free = Math.max(0, b.total - busy);
   $("#free-figure").innerHTML = `${free} <small>/ ${b.total}</small>`;
   $("#free-caption").textContent = free === 1 ? "builder free" : "builders free";
-  $("#builders-source").textContent = b.source === "counter" ? "total from the in-game counter"
-    : "total from the export (an idle extra builder may be missing)";
+  $("#builders-source").textContent = "real builders only (the gem-paid Goblin Builder is never counted)";
   $("#builder-meter").innerHTML = Array.from({ length: b.total }, (_, i) =>
     `<span class="${i < busy ? "busy" : ""}"></span>`).join("");
-  const nxt = busy < b.total ? t : Math.min(...b.jobs.filter(j => j.ends_at > t).map(j => j.ends_at));
+  const nxt = busy < b.total ? t : Math.min(...b.jobs.filter(j => j.ends_at > t && !j.extra).map(j => j.ends_at));
   const known = Number.isFinite(nxt);
   if (free || !known) delete $("#next-free").dataset.countdown;
   else $("#next-free").dataset.countdown = nxt;
@@ -264,7 +263,7 @@ function renderBuilders() {
   $("#builder-lanes").innerHTML = idle.join("") + active.map(laneHTML).join("");
   $("#builder-table").innerHTML = `<table class="data"><thead><tr><th>Upgrade</th><th>Level</th>
       <th>Finishes</th><th class="num">Remaining</th></tr></thead><tbody>${
-      active.map(j => `<tr><td>${esc(j.name)}${j.extra ? " (extra builder)" : ""}</td><td>${j.from} → ${j.to}</td>
+      active.map(j => `<tr><td>${esc(j.name)}${j.extra ? " (Goblin)" : ""}</td><td>${j.from} → ${j.to}</td>
         <td>${clock(j.ends_at)}</td><td class="num">${dur(j.ends_at - t)}</td></tr>`).join("")}</tbody></table>`;
 }
 
@@ -273,7 +272,7 @@ function miniList(el, jobs, emptyText) {
   const live = jobs.filter(j => j.ends_at > t);
   el.innerHTML = live.length ? live.map(j => {
     const start = j.duration ? j.ends_at - j.duration : null;
-    const tags = (j.helper ? ' <span class="tag">assistant</span>' : "") + (j.extra ? ' <span class="tag">extra slot</span>' : "");
+    const tags = (j.helper ? ' <span class="tag">assistant</span>' : "") + (j.extra ? ' <span class="tag" title="Gem-paid Goblin Researcher; not counted">Goblin</span>' : "");
     return `<div class="mini-item"><div><b>${esc(j.name)}</b> <span class="muted">${j.from} → ${j.to}</span>${tags}</div>
       <div class="num" style="text-align:right"><span data-countdown="${j.ends_at}">–</span><div class="muted" style="font-size:12px">${clock(j.ends_at)}</div></div>
       <div class="bar"><i data-start="${start ?? ""}" data-end="${j.ends_at}"></i></div></div>`;
@@ -527,7 +526,7 @@ function renderQueue() {
     return `<div class="q-item ${it.enabled ? "" : "disabled"}" draggable="true" data-id="${it.id}">
       <div class="grip" title="Drag to reorder"><svg viewBox="0 0 24 24" fill="currentColor"><circle cx="9" cy="6" r="1.6"/><circle cx="15" cy="6" r="1.6"/><circle cx="9" cy="12" r="1.6"/><circle cx="15" cy="12" r="1.6"/><circle cx="9" cy="18" r="1.6"/><circle cx="15" cy="18" r="1.6"/></svg></div>
       <div class="q-pos">${idx + 1}</div>
-      <div class="q-main"><div class="q-title">${esc(it.name)}
+      <div class="q-main"><div class="q-title">${esc(it.name)}${it.worker && it.worker !== "builder" ? ` <span class="tag">${it.worker === "lab" ? "Laboratory" : "Pet House"}</span>` : ""}
           ${c ? `<span class="muted" style="font-weight:400;font-size:12.5px">×${c.count}, level ${c.min_level === c.levels?.[c.levels.length - 1] ? c.min_level : c.min_level + "–" + c.levels[c.levels.length - 1]}</span>` : ""}
           ${c?.upgrading ? `<span class="tag" title="Counted at its next level">${c.upgrading} upgrading</span>` : ""}</div>
         <div class="q-meta">${meta.map(m => `<span>${m}</span>`).join("")}</div></div>
@@ -627,17 +626,29 @@ function renderPlanTimeline() {
   const cs = getComputedStyle(document.documentElement);
   const c1 = cs.getPropertyValue("--series-1").trim(), c2 = cs.getPropertyValue("--series-2").trim();
   const t = now();
-  const lanes = Array.from({ length: p.builders }, (_, i) => ({ label: `Builder ${i + 1}`, bars: [] }));
+  // One row per REAL slot: builders, then the lab, then the pet house.
+  const slots = p.slots && Object.keys(p.slots).length ? p.slots : { builder: p.builders };
+  const label = { builder: "Builder", lab: "Lab", pet_house: "Pet House" };
+  const rows = [], base = {};
+  for (const w of ["builder", "lab", "pet_house"]) {
+    base[w] = rows.length;
+    for (let i = 0; i < (slots[w] || 0); i++)
+      rows.push({ label: slots[w] > 1 ? `${label[w]} ${i + 1}` : label[w], bars: [] });
+  }
   // Same lane order as the server's preview: idle lanes first, then jobs by end time.
-  const jobs = p.current.filter(j => j.end > t);
-  const idle = Math.max(0, p.builders - jobs.length);
-  jobs.forEach((j, i) => lanes[idle + i]?.bars.push({ start: t, end: j.end, fill: c1, text: `${j.name} ${j.to}`, short: `${j.to}`,
-    tip: `<b>${esc(j.name)}</b> ${j.from} → ${j.to}<br>in progress, finishes ${clock(j.end)}${j.extra ? "<br>extra builder" : ""}` }));
-  p.schedule.forEach(s => lanes[s.lane]?.bars.push({ start: s.start, end: Math.max(s.end, s.start + 600), fill: c2,
-    text: `${s.name} ${s.to}`, short: `${s.to}`,
+  for (const w of Object.keys(base)) {
+    const jobs = p.current.filter(j => (j.worker || "builder") === w && j.end > t);
+    const idle = Math.max(0, (slots[w] || 0) - jobs.length);
+    jobs.forEach((j, i) => rows[base[w] + idle + i]?.bars.push({ start: t, end: j.end, fill: c1,
+      text: `${j.name} ${j.to}`, short: `${j.to}`,
+      tip: `<b>${esc(j.name)}</b> ${j.from} → ${j.to}<br>in progress, finishes ${clock(j.end)}` }));
+  }
+  p.schedule.forEach(s => rows[base[s.worker || "builder"] + s.lane]?.bars.push({
+    start: s.start, end: Math.max(s.end, s.start + 600), fill: c2, text: `${s.name} ${s.to}`, short: `${s.to}`,
     tip: `<b>${esc(s.name)}</b> ${s.from} → ${s.to}<br>${clock(s.start)} → ${clock(s.end)}<br>${resIcon(resName(s.resource))} ${nf.format(s.cost)} ${esc(s.resource)}` }));
-  const end = Math.max(t + 3 * 86400, ...p.schedule.map(s => s.end), ...jobs.map(j => j.end));
-  timeline($("#plan-timeline"), lanes, t - 3600, Math.min(end + 3600, t + 45 * 86400), { labelWidth: 90 });
+  const ends = [...p.schedule.map(s => s.end), ...p.current.map(j => j.end)];
+  const end = Math.max(t + 3 * 86400, ...ends);
+  timeline($("#plan-timeline"), rows, t - 3600, Math.min(end + 3600, t + 45 * 86400), { labelWidth: 90 });
 }
 
 // ---------- settings ----------

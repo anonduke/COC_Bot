@@ -229,16 +229,17 @@ def cmd_dryrun(args):
             print("the queue has nothing to do")
             return 1
         name, from_level, p = nxt
-        print(f"next queue step: {name} {from_level} -> {from_level + 1} "
+        worker = p.worker
+        print(f"next queue step: {name} {from_level} -> {from_level + 1} ({worker}) "
               f"(planned start {_clock(p.start)})")
     else:
         if not (args.name and args.from_level):
             print("use --queue, or --name NAME --from LEVEL")
             return 2
-        name, from_level = args.name, args.from_level
+        name, from_level, worker = args.name, args.from_level, args.worker
     with keep_display_on():
         try:
-            r = dry_run(name, from_level, log=lambda m: print(m, flush=True))
+            r = dry_run(name, from_level, log=lambda m: print(m, flush=True), worker=worker)
         except (CaptureError, UpgradeError, adb.AdbError, OSError) as e:
             print(f"dry run failed: {e}")
             store.notify("error", "upgrade", f"Dry run for {name} failed", str(e))
@@ -373,6 +374,8 @@ def main(argv=None):
     d.add_argument("--queue", action="store_true", help="the next step of the upgrade queue")
     d.add_argument("--name", help='building/hero name as in game, e.g. "Wizard Tower"')
     d.add_argument("--from", dest="from_level", type=int, help="current level of that copy")
+    d.add_argument("--worker", default="builder", choices=("builder", "lab", "pet_house"),
+                   help="Build panel tab: builder, lab (troops/spells/sieges) or pet_house")
     d.set_defaults(func=cmd_dryrun)
     se = sub.add_parser("session", help="one session: capture, farm, upgrade (orchestrator runs it)")
     se.add_argument("--trigger", default="manual")

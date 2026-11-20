@@ -132,7 +132,8 @@ class BasicWebTest(WebTest):
         self.assertEqual(st["snapshot"]["tag"], "#TESTTAG")
         self.assertEqual(st["resources"], {"gold": 1, "elixir": 2, "dark_elixir": 3, "gems": 4})
         b = st["builders"]
-        self.assertEqual((b["total"], b["source"], len(b["jobs"])), (7, "counter", 7))
+        # 6 real builders (Goblin not counted); 7 jobs incl. the Goblin's
+        self.assertEqual((b["total"], b["source"], len(b["jobs"])), (6, "export", 7))
 
     def test_history_and_status(self):
         self.assertEqual(self.api("/api/history?hours=10000000")[0], 200)

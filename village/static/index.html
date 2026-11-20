@@ -16,7 +16,7 @@
       <div><div class="brand-name">Village Control</div><div class="brand-sub" id="brand-sub">COC bot</div></div>
     </div>
     <button class="nav-btn active" data-page="dashboard"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg><span>Dashboard</span></button>
-    <button class="nav-btn" data-page="queue"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 6h13M8 12h13M8 18h13"/><circle cx="4" cy="6" r="1.2"/><circle cx="4" cy="12" r="1.2"/><circle cx="4" cy="18" r="1.2"/></svg><span>Builder queue</span></button>
+    <button class="nav-btn" data-page="queue"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 6h13M8 12h13M8 18h13"/><circle cx="4" cy="6" r="1.2"/><circle cx="4" cy="12" r="1.2"/><circle cx="4" cy="18" r="1.2"/></svg><span>Upgrade queue</span></button>
     <button class="nav-btn" data-page="automation"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span>Automation</span></button>
     <button class="nav-btn" data-page="attack"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14.5 17.5L3 6V3h3l11.5 11.5"/><path d="M13 19l6-6M16 16l4 4M19 21l2-2"/></svg><span>Attack</span></button>
     <button class="nav-btn" data-page="settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg><span>Settings</span></button>
@@ -103,18 +103,22 @@
     <section id="page-queue" class="hidden">
       <div class="grid main-split">
         <div class="card">
-          <div class="card-head"><h2>Upgrade queue</h2><span class="sub">drag to reorder · the first item gets the next free builder</span>
+          <div class="card-head"><h2>Upgrade queue</h2><span class="sub">drag to reorder · builders, the lab and the pet house each take their own items in queue order</span>
             <span class="right"><button class="btn small" id="btn-dryrun" title="Open the next step's upgrade dialog in the game, read it and close it. Never confirms. Takes a few minutes; the result appears under Alerts.">Dry run next step</button></span></div>
           <div class="queue" id="queue"></div>
         </div>
         <div class="card">
           <div class="card-head"><h2>Add to queue</h2><span class="sub" id="cat-sub"></span></div>
-          <input class="search" id="cat-search" placeholder="Search buildings, heroes, traps…" autocomplete="off">
+          <input class="search" id="cat-search" placeholder="Search buildings, heroes, troops, spells, pets…" autocomplete="off">
           <div class="chips" id="cat-chips">
             <button class="chip active" data-kind="all">All</button>
             <button class="chip" data-kind="hero">Heroes</button>
             <button class="chip" data-kind="building">Buildings</button>
             <button class="chip" data-kind="trap">Traps</button>
+            <button class="chip" data-kind="troop">Troops</button>
+            <button class="chip" data-kind="spell">Spells</button>
+            <button class="chip" data-kind="siege">Sieges</button>
+            <button class="chip" data-kind="pet">Pets</button>
             <button class="chip" data-kind="maxed">Show maxed</button>
           </div>
           <div class="cat-list" id="cat-list"></div>

@@ -4,11 +4,13 @@ All functions take the time explicitly (`now`, epoch seconds) so they can be
 tested with a fake clock. Forecasts assume nothing new is started after the
 snapshot.
 
-Total builders: the in-game counter ("1/7") is authoritative. The export alone
-can't see an idle extra builder: it lists Builder's Huts and B.O.B's Hut, and
-a job on the extra (7th) builder carries `extra: true`, but an idle extra
-builder leaves no trace. So without a counter reading the total is a lower
-bound.
+Workers: "builder" (buildings, traps, heroes), "lab" (troops, spells, siege
+machines) and "pet_house" (pets). Only REAL slots are counted: builders =
+Builder's Huts + B.O.B's Hut, lab = 1, pet house = 1. The game also offers a
+gem-paid Goblin Builder / Goblin Researcher; their slots are included in the
+in-game counters ("1/7", "1/2") and their jobs are marked `extra: true` in the
+export. We never use them, so they are not counted: an `extra` job does not
+occupy a real slot (live 2026-11-19: "1/7" meant 0 of 6 real builders free).
 
 Helpers: a job with `helper_recurrent` gets the helper's boost every time the
 helper comes off cooldown. Builder's Apprentice level L adds L x progress for
@@ -34,7 +36,7 @@ class BuilderJob:
     timer_end: int        # export timestamp + timer: end if nothing speeds it up
     ends_at: float        # predicted end including helper boosts
     helper: bool
-    extra: bool           # runs on the extra (7th) builder
+    extra: bool           # done by the gem-paid Goblin Builder/Researcher (not a real slot)
 
     @property
     def key(self):
@@ -44,34 +46,47 @@ class BuilderJob:
 @dataclass
 class BuilderForecast:
     taken_at: int                     # export timestamp
-    total: int
-    total_source: str                 # "counter" or "export" (lower bound)
-    jobs: list = field(default_factory=list)  # BuilderJob, sorted by ends_at
+    total: int                        # real slots of this worker
+    total_source: str                 # always "export" (kept for the API)
+    jobs: list = field(default_factory=list)  # BuilderJob, sorted by ends_at (goblin jobs too)
+    kind: str = "builder"
+
+    def real_jobs(self):
+        return [j for j in self.jobs if not j.extra]
 
     def busy(self, now):
-        return sum(1 for j in self.jobs if j.ends_at > now)
+        return sum(1 for j in self.real_jobs() if j.ends_at > now)
 
     def free(self, now):
         return max(0, self.total - self.busy(now))
 
     def next_free_at(self, now):
-        """When the next builder is free: `now` if one already is, else the
-        earliest predicted end (None if there are no builders at all)."""
+        """When the next real slot is free: `now` if one already is, else the
+        earliest predicted end of a real job (None if there are no slots)."""
         if self.free(now) > 0:
             return now
-        ends = [j.ends_at for j in self.jobs if j.ends_at > now]
+        ends = [j.ends_at for j in self.real_jobs() if j.ends_at > now]
         return min(ends) if ends else None
 
     def frees_between(self, start, end):
-        """Jobs predicted to finish in (start, end]."""
-        return [j for j in self.jobs if start < j.ends_at <= end]
+        """Real jobs predicted to finish in (start, end]."""
+        return [j for j in self.real_jobs() if start < j.ends_at <= end]
 
 
-def total_from_export(snapshot):
+LABORATORY = 1000007
+PET_HOUSE = 1000068
+WORKERS = ("builder", "lab", "pet_house")
+
+
+def total_from_export(snapshot, kind="builder"):
+    """Real slots of a worker (Goblin slots excluded)."""
+    if kind == "lab":
+        return 1 if snapshot.level_of(LABORATORY) else 0
+    if kind == "pet_house":
+        return 1 if snapshot.level_of(PET_HOUSE) else 0
     huts = sum(e.count for e in snapshot.section("buildings") if e.data == BUILDERS_HUT)
     bob = 1 if any(e.data == BOBS_HUT for e in snapshot.section("buildings")) else 0
-    extra = 1 if any(j.extra for j in snapshot.builder_jobs()) else 0
-    return huts + bob + extra
+    return huts + bob
 
 
 def helper_windows(snapshot, gamedata, helper_id, horizon):
@@ -116,25 +131,25 @@ def finish_time(start, work, windows):
     return t + w
 
 
-def forecast(snapshot, gamedata=None, counter=None):
-    """BuilderForecast for the home village. `counter` is the (free, total)
-    read from the screen, if available. `gamedata` is needed only to model
+def forecast(snapshot, gamedata=None, counter=None, kind="builder"):
+    """BuilderForecast for one worker of the home village. Slots come from the
+    export (real slots only, see the module docstring); `counter` is accepted
+    for compatibility but no longer sets the total, because the in-game
+    counters include the Goblin slots. `gamedata` is needed only to model
     helper boosts; without it helper jobs use the plain timer."""
+    helper = HELPER_FOR_KIND.get(kind)
     jobs = []
-    for j in snapshot.builder_jobs():
+    for j in snapshot.jobs(kind):
         timer_end = j.ends_at
         ends_at = float(timer_end)
-        if j.helper:
-            windows = helper_windows(snapshot, gamedata, BUILDER_APPRENTICE, timer_end)
+        if j.helper and helper:
+            windows = helper_windows(snapshot, gamedata, helper, timer_end)
             ends_at = finish_time(snapshot.timestamp, timer_end - snapshot.timestamp, windows)
         jobs.append(BuilderJob(j.section, j.data, j.from_level, timer_end, ends_at,
                                j.helper, j.extra))
     jobs.sort(key=lambda j: j.ends_at)
-    if counter is not None:
-        total, source = counter[1], "counter"
-    else:
-        total, source = total_from_export(snapshot), "export"
-    return BuilderForecast(snapshot.timestamp, total, source, jobs)
+    return BuilderForecast(snapshot.timestamp, total_from_export(snapshot, kind), "export",
+                           jobs, kind)
 
 
 # --- verification against live data -------------------------------------
